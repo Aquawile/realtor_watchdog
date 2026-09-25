@@ -50,6 +50,20 @@ The platform makes no editorial statements about any realtor or property. It sur
   - Tier 3 (careful/later): police open-data crime incidents shown ONLY as a dated, sourced list. Never a "safety score."
 - **Monetization:** undecided and not needed for MVP. Do NOT build realtor-facing paid features (leads, featured placement, profile boosts); they would undermine the no-realtor-bias promise.
 
+## Decisions made in Phase 1 (owner-confirmed, 2026-09-24)
+- **Reviews are discussion threads, Reddit-like (but not a Reddit copy).** A review is a post; people discuss under it and are free to be gossipy.
+  - Nested replies (reply to any comment, any depth).
+  - Likes and dislikes on reviews and comments. Default order is newest-first; reactions never hide content.
+  - A user may post any number of reviews about the same realtor. Authors can edit (shown as "edited") and delete (shown as "[deleted]" so replies stay in place).
+- **Star rating:** each review has a required 1–5 star rating. The realtor profile shows the average plus a review count, counting only visible reviews.
+- **Public identity:** a unique username chosen at signup (3–20 chars, letters/digits/underscore, case-insensitive). Email is never shown.
+- **Auto-hide:** reported content stays live, except when **5 distinct users** report it as Threatening or Private information. It is then hidden pending moderator review, and dismissing the report restores it.
+- **DRE data (verified):** `https://secure.dre.ca.gov/datafile/CurrList.zip` → `CurrList.csv`, updated daily, ~429k rows statewide, ~53.7k unique licenses where `county_name = ORANGE`.
+  - The file lists only current licensees (`Licensed` / `Licensed NBA`). A realtor who drops out is kept, with `in_current_dre_file = false`.
+  - Profiles are for individuals only (Salesperson, Broker). Corporation/Officer rows are not profiles. Brokerage comes from `related_lic_*`.
+  - DRE addresses are often home addresses, so only city/county are stored.
+- **Schema lives in `supabase/migrations/`.** Behavioral tests: `npm run test:db` (PGlite, no Docker).
+
 ## Stack (agreed)
 - Next.js (App Router) + TypeScript + Tailwind, ESLint, `src/` dir, `@/*` alias — already scaffolded.
 - Supabase free tier: Postgres, Auth, Storage (optional review documents; visible to moderators only).
@@ -76,4 +90,6 @@ Not done yet (owner must do these, Claude cannot create accounts):
 - Create a Supabase project (free tier) and supply its URL + keys via `.env.local` (never commit secrets).
 - Vercel account/project (later).
 
-Next up after Phase 0: Phase 1 — Postgres schema derived strictly from `docs/prd/` (REQ-001–REQ-010, UC-001–UC-031), adjusted for the MLS cut above. Ask the owner about anything the docs don't settle.
+Phase 1 (schema) — written and tested locally; see "Decisions made in Phase 1". Applying it to the hosted Supabase project needs the owner to link the CLI (`npx supabase login`, `npx supabase link`) and then `npx supabase db push`.
+
+Original Phase 1 brief: Phase 1 — Postgres schema derived strictly from `docs/prd/` (REQ-001–REQ-010, UC-001–UC-031), adjusted for the MLS cut above. Ask the owner about anything the docs don't settle.
