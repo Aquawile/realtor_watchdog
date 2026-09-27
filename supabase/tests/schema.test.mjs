@@ -26,6 +26,9 @@ await db.exec(`
   alter table storage.objects enable row level security;
   create function storage.foldername(name text) returns text[] language sql immutable as
     $$ select (string_to_array(name, '/'))[1:array_length(string_to_array(name, '/'), 1) - 1] $$;
+  -- Supabase grants new public tables to anon/authenticated by default;
+  -- mirror that so tests catch a missing revoke.
+  alter default privileges in schema public grant all on tables to anon, authenticated;
   set search_path = public, extensions;
 `);
 await db.exec(migration);
@@ -214,6 +217,21 @@ ok('anon reads property cache', (await as(null, `select * from property_source_d
 ok('anon cannot write property cache', !!(await fails(null, `insert into properties (address_normalized, address_display) values ('a','a')`)));
 ok('authenticated cannot write property cache', !!(await fails(users.alice, `delete from property_source_data returning 1`).then(async (m) => m || ((await db.query('select count(*)::int n from property_source_data')).rows[0].n === 1))));
 ok('address trigram search', (await as(null, `select id from properties where address_normalized % '1 MAIN STREET IRVINE'`)).rows.length === 1);
+
+// Raw DRE layer: server-only.
+for (const t of ['raw_dre_bulk_files', 'raw_dre_fetch_batches', 'raw_dre_page_fetches']) {
+  ok(`anon cannot read ${t}`, !!(await fails(null, `select * from ${t}`)));
+  ok(`users cannot read ${t}`, !!(await fails(users.alice, `select * from ${t}`)));
+  ok(`users cannot write ${t}`, !!(await fails(users.alice, `delete from ${t}`)));
+}
+ok('dre-raw bucket is private', (await db.query(`select public from storage.buckets where id = 'dre-raw'`)).rows[0]?.public === false);
+const batch = (await db.query(`insert into raw_dre_fetch_batches (runner) values ('test') returning id`)).rows[0].id;
+ok('page fetch needs a stored file when ok', !!(await db.query(
+  `insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome) values ($1, '00000001', 'u', 'ok')`, [batch]).then(() => false, () => true)));
+ok('network error has no stored file', !!(await db.query(
+  `insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome, error) values ($1, '00000001', 'u', 'network_error', 'timeout') returning id`, [batch])));
+ok('bad license number rejected', !!(await db.query(
+  `insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome) values ($1, '123', 'u', 'network_error')`, [batch]).then(() => false, () => true)));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

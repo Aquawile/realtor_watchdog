@@ -8,7 +8,10 @@
     "start": "next start",
     "lint": "eslint",
     "test:db": "node supabase/tests/schema.test.mjs",
-    "ingest:dre": "node --env-file=.env.local scripts/ingest-dre.mts"
+    "ingest:dre": "node --env-file=.env.local scripts/ingest-dre.mts",
+    "test": "node scripts/run-all-tests.mjs",
+    "test:fetch": "node --test \"scripts/tests/*.test.mts\"",
+    "fetch:dre": "node --env-file=.env.local scripts/fetch-dre-pages.mts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",

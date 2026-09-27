@@ -1,0 +1,33 @@
+name: Checks
+
+# Lint, type-check, every test suite (none may be skipped), and a production
+# build. Runs on every push and pull request, and is called by the data
+# workflows before they touch DRE or Supabase.
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies (3 attempts)
+        run: for i in 1 2 3; do npm ci && break; [ "$i" = 3 ] && exit 1; sleep 15; done
+      - name: Lint
+        run: npx eslint
+      - name: Type-check
+        run: npx tsc --noEmit -p .
+      - name: Tests (fails on any failed, skipped, todo or missing test)
+        run: npm test
+      - name: Build
+        run: npx next build

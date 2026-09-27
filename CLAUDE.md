@@ -6,6 +6,8 @@ Read this file and the PRD docs in `docs/prd/` before doing any work. They are t
 - ALWAYS use `docs/prd/` and this file as context for how the app works.
 - NEVER make assumptions about how something should be built. If anything is unclear, ASK before building.
 - You have permission to use git and to create/edit GitHub Actions workflows (e.g., for cron/scheduled jobs).
+- **Raw first, always.** Every external data source is stored raw and unmodified (exact bytes) before any processing, and processed data lives separately. Data is relational.
+- **First full run of a new source: raw, then stop.** For the very first full run of a source (e.g. all ~49k DRE licensee pages), finish and verify the raw layer, then get the owner's explicit permission before building or running the processed layer. Once approved, later refresh runs may process automatically.
 - **All work happens on the `dev` branch.** Merge `dev` into `main` only when the owner explicitly says so.
 - Prefer free tiers everywhere. Do NOT use Google Cloud (GCP) for this project — the owner's GCP credits belong to a different project.
 - Nothing should depend on the owner's own computer running. Hosting is managed services only (no VM, no Docker server).
@@ -65,7 +67,12 @@ The platform makes no editorial statements about any realtor or property. It sur
   - DRE addresses are often home addresses, so only city/county are stored.
 - **Brokerage for brokers (decided 2026-09-27):** a broker's own DRE row never names a brokerage. Profiles show the corporations they're an officer of (DRE Officer rows → `realtors.officer_of`, possibly several). Independent brokers show none. The Broker Associate List file is not used.
 - **Realtors who leave scope (decided 2026-09-27):** "freeze and flag". If a realtor isn't in today's OC in-scope set, either because they left the DRE file or moved to another county, they get `in_current_dre_file = false` and are no longer updated. The profile and reviews stay. If they come back into scope they're updated and flagged true again.
-- **DRE ingestion:** `scripts/ingest-dre.mts` (`npm run ingest:dre -- --dry-run`), nightly via `.github/workflows/dre-ingest.yml`. Repo secrets `SUPABASE_URL` and `SUPABASE_SECRET_KEY`. It refuses to write if the in-scope count drops below 90% of realtors currently in file.
+- **DRE bulk ingestion:** `scripts/ingest-dre.mts` via `.github/workflows/dre-ingest.yml`. **Schedule disabled, manual only.** The first write to `realtors` has not been approved, and the cadence is being redesigned: a weekly fingerprint check (upload fingerprints, let the DB diff, process only changed realtors) instead of a nightly full read-back. Repo secrets `SUPABASE_URL` and `SUPABASE_SECRET_KEY`. It refuses to write if the in-scope count drops below 90% of realtors currently in file.
+- **DRE licensee pages (decided 2026-09-27/28):** each realtor's page on DRE's Public License Lookup (`https://www2.dre.ca.gov/PublicASP/pplinfo.asp?License_id=<8 digits>`, no API) has their history: past brokerages with dates, officer roles, former names, DBAs, discipline comments, and hearing-document links. We fetch all OC pages and **extract the exact information into fields** (processed layer, after owner approval), keeping DRE's verbatim text alongside, plus a link to the live record. Hearing PDFs are linked, not downloaded.
+  - **Raw layer:** `scripts/fetch-dre-pages.mts` via `.github/workflows/dre-raw-fetch.yml` (manual: `selftest`, then batches 100 → 500 → 2,000 → 10,000 → rest, stopping for owner review after each). Exact bytes go to the private Storage bucket `dre-raw`; receipts go to `raw_dre_bulk_files`, `raw_dre_fetch_batches` and `raw_dre_page_fetches`, which are server-only. Every stored file is verified by downloading it back and checking the checksum.
+  - **Pacing guardrail** (measured 2026-09-27: ~1.1 s per page, DRE unaffected up to 4 parallel requests, +10–19% at 8–12): adaptive 2 → max 8 parallel. Halve if >30% slower than baseline; pause and drop to 1 if >2x; stop on HTTP 403/429/503, 5 errors in a row, or >2% errors. No robots.txt on www2, no published rate limit.
+  - Processed-layer design so far: one-per-realtor facts become columns on `realtors`; repeating facts go into 2 tables (`realtor_affiliations`, `realtor_dre_actions`). Column names are finalized only after a field survey of all raw pages, reviewed by the owner.
+- **Testing:** `npm test` runs every suite and fails on any failed, skipped, todo or missing test. `.github/workflows/checks.yml` runs lint, type-check, tests and build on every push, and data workflows run it first.
 - **Schema lives in `supabase/migrations/`.** Behavioral tests: `npm run test:db` (PGlite, no Docker).
 
 ## Stack (agreed)
@@ -94,5 +101,5 @@ The platform makes no editorial statements about any realtor or property. It sur
 
 ## Current status
 - Owner setup done: GitHub repo (`origin`), Supabase project (keys in `.env.local`, never committed). Vercel comes later.
-- Phase 4a (DRE ingestion) in progress on `dev`.
+- Phase 4a (DRE ingestion) in progress on `dev`. The raw-layer code is built and tested locally. Its migration (`20260928000000_raw_dre_pages.sql`) is NOT applied yet, and the workflows are not on `main` yet (both need owner approval).
 - Local dev note: a stray `node` v20.7 package in the owner's home folder (`~/node_modules/.bin/node`) shadows Node 22 inside `npm run`, so `npm run build` fails locally. The owner chose to leave it. Run Next directly with `node node_modules/next/dist/bin/next build`, or run scripts with `node ...`.

@@ -1,0 +1,67 @@
+name: DRE raw fetch
+
+# Raw layer: stores DRE public license lookup pages byte-for-byte in the
+# private Supabase bucket 'dre-raw' (see scripts/fetch-dre-pages.mts).
+# Manual only. Start with mode=selftest, then small batches.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "selftest = check runner, secrets, Supabase and DRE without storing pages; fetch = run a batch"
+        type: choice
+        options: [selftest, fetch]
+        default: selftest
+      limit:
+        description: "Pages in this batch (fetch mode)"
+        type: number
+        default: 100
+      max_concurrency:
+        description: "Maximum parallel requests to DRE (the guardrail may use fewer)"
+        type: number
+        default: 8
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dre-network # never overlaps another job that calls DRE
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/checks.yml
+
+  fetch:
+    needs: test # nothing is fetched unless every check and test passed
+    runs-on: ubuntu-latest
+    # The script stops itself at 300 min; this is the hard ceiling. On timeout
+    # or cancel, GitHub signals the script, which finishes in-flight pages and
+    # records the stop. A runner that dies outright is detected by the next run
+    # (silent heartbeat -> batch marked abandoned) and its pages are re-fetched.
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies (3 attempts)
+        run: for i in 1 2 3; do npm ci && break; [ "$i" = 3 ] && exit 1; sleep 15; done
+      - name: Fetch
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          MODE: ${{ inputs.mode }}
+          LIMIT: ${{ inputs.limit }}
+          MAX_CONCURRENCY: ${{ inputs.max_concurrency }}
+        run: |
+          if [ "$MODE" = "selftest" ]; then
+            node scripts/fetch-dre-pages.mts --selftest
+          else
+            node scripts/fetch-dre-pages.mts --limit "$LIMIT" --max-concurrency "$MAX_CONCURRENCY" --max-minutes 300
+          fi
+      - name: Note abnormal end
+        if: failure() || cancelled()
+        run: |
+          echo "### Run did not complete normally" >> "$GITHUB_STEP_SUMMARY"
+          echo "Exit code 2 = stopped by a guardrail (see reason above); 1 = crash or verification failure. Nothing is lost: unfinished or failed pages are fetched again by the next batch." >> "$GITHUB_STEP_SUMMARY"

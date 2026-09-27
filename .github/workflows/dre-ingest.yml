@@ -1,27 +1,30 @@
 name: DRE ingestion
 
-# Nightly refresh of Orange County realtors from the CA DRE licensee file
-# (updated by DRE daily, overnight Pacific time). Scheduled runs only fire
-# from the default branch (main).
+# Refresh of Orange County realtors from the CA DRE licensee bulk file.
+# Schedule intentionally disabled: the owner has not approved the first write
+# to `realtors`, and the cadence is being redesigned (weekly fingerprint check).
+# Manual runs only until then.
 on:
-  schedule:
-    - cron: "30 10 * * *" # 10:30 UTC = 3:30 AM PDT / 2:30 AM PST
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Dry run (read-only, print counts)"
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: dre-ingest
+  group: dre-network # never overlaps another job that calls DRE
   cancel-in-progress: false
 
 jobs:
+  test:
+    uses: ./.github/workflows/checks.yml
+
   ingest:
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -30,7 +33,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - name: Install dependencies (3 attempts)
+        run: for i in 1 2 3; do npm ci && break; [ "$i" = 3 ] && exit 1; sleep 15; done
       - name: Ingest DRE licensees
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

@@ -12,11 +12,7 @@
 // Env: SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL), SUPABASE_SECRET_KEY.
 
 import { createClient } from "@supabase/supabase-js";
-import { parse } from "csv-parse/sync";
-import { unzipSync } from "fflate";
-
-const SOURCE_URL = "https://secure.dre.ca.gov/datafile/CurrList.zip";
-const SCOPE_COUNTY = "ORANGE";
+import { BULK_SOURCE_URL as SOURCE_URL, downloadBulkZip, isOcIndividual, parseBulkZip, type DreRow } from "./lib/dre-bulk.mts";
 const PAGE_SIZE = 1000;
 const UPSERT_BATCH = 1000;
 const FLAG_BATCH = 200;
@@ -25,17 +21,6 @@ const SEEN_BATCH = 5000;
 // realtors currently marked in-file: a truncated or changed file must not
 // flag everyone as gone.
 const MIN_SCOPE_RATIO = 0.9;
-
-const EXPECTED_COLUMNS = [
-  "multiple_license_ind", "lastname_primary", "firstname_secondary", "name_suffix",
-  "lic_number", "lic_type", "lic_status", "lic_effective_date", "lic_expiration_date",
-  "original_date_of_license", "related_lic_number", "related_lastname_primary",
-  "related_firstname_secondary", "related_name_suffix", "related_lic_type",
-  "address_1", "address_2", "city", "state", "zip_code", "foreign_nation",
-  "foreign_postal_info", "county_name", "restricted_flag", "ethics_and_agency_ind",
-];
-
-type DreRow = Record<(typeof EXPECTED_COLUMNS)[number], string>;
 
 type Officership = { license_number: string; name: string };
 
@@ -86,21 +71,6 @@ function relatedName(r: DreRow): string | null {
   return [first, last, blank(r.related_name_suffix)].filter(Boolean).join(" ");
 }
 
-async function download(): Promise<DreRow[]> {
-  const res = await fetch(SOURCE_URL);
-  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
-  const files = unzipSync(new Uint8Array(await res.arrayBuffer()));
-  const csvName = Object.keys(files).find((n) => n.toLowerCase().endsWith(".csv"));
-  if (!csvName) throw new Error(`no CSV in zip (found: ${Object.keys(files).join(", ")})`);
-  // The file is Latin-1, not UTF-8 (e.g. "Magaña").
-  const text = new TextDecoder("latin1").decode(files[csvName]);
-  const header = text.slice(0, text.indexOf("\n")).trim().split(",");
-  if (header.join() !== EXPECTED_COLUMNS.join()) {
-    throw new Error(`DRE file columns changed:\n  got      ${header.join()}\n  expected ${EXPECTED_COLUMNS.join()}`);
-  }
-  return parse(text, { columns: true, skip_empty_lines: true }) as DreRow[];
-}
-
 function buildScope(rows: DreRow[]): Map<string, RealtorRow> {
   const officerOf = new Map<string, Officership[]>();
   for (const r of rows) {
@@ -112,8 +82,7 @@ function buildScope(rows: DreRow[]): Map<string, RealtorRow> {
 
   const scope = new Map<string, RealtorRow>();
   for (const r of rows) {
-    if (r.lic_type !== "Salesperson" && r.lic_type !== "Broker") continue;
-    if (r.county_name.trim().toUpperCase() !== SCOPE_COUNTY) continue;
+    if (!isOcIndividual(r)) continue;
     if (scope.has(r.lic_number)) throw new Error(`duplicate individual license ${r.lic_number}`);
     const officerships = (officerOf.get(r.lic_number) ?? [])
       .sort((a, b) => a.license_number.localeCompare(b.license_number));
@@ -171,7 +140,7 @@ async function main() {
 
   try {
     console.log(`Downloading ${SOURCE_URL} ...`);
-    const rows = await download();
+    const rows = parseBulkZip((await downloadBulkZip()).bytes);
     const scope = buildScope(rows);
 
     console.log("Loading existing realtors ...");
