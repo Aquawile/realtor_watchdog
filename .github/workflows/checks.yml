@@ -26,7 +26,9 @@ jobs:
       - name: Lint
         run: npx eslint
       - name: Type-check
-        run: npx tsc --noEmit -p .
+        # Next.js generates route types (e.g. LayoutProps) into .next/; a fresh
+        # checkout has none, so generate them first.
+        run: npx next typegen && npx tsc --noEmit -p .
       - name: Tests (fails on any failed, skipped, todo or missing test)
         run: npm test
       - name: Build
