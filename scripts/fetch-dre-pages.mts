@@ -63,12 +63,17 @@ const db = createClient(url, key, { auth: { persistSession: false } });
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const log = (msg: string) => console.log(`[${new Date().toISOString()}] ${msg}`);
 
-// Supabase returns { data, error }; turn errors (and missing data) into exceptions.
+// Supabase returns { data, error }. Reads: errors and missing data throw.
 async function q<T>(what: string, p: PromiseLike<{ data: T | null; error: unknown }>): Promise<T> {
   const { data, error } = await p;
   if (error) throw new Error(`${what}: ${JSON.stringify(error)}`);
   if (data === null) throw new Error(`${what}: no data returned`);
   return data;
+}
+// Writes (insert/update without .select()) legitimately return no data: only errors throw.
+async function w(what: string, p: PromiseLike<{ error: unknown }>): Promise<void> {
+  const { error } = await p;
+  if (error) throw new Error(`${what}: ${JSON.stringify(error)}`);
 }
 
 async function fetchPage(pageUrl: string, timeoutMs: number) {
@@ -78,9 +83,9 @@ async function fetchPage(pageUrl: string, timeoutMs: number) {
 
 const verifyDeps = {
   download: async (path: string) => new Uint8Array(await (await q("download", db.storage.from(BUCKET).download(path))).arrayBuffer()),
-  markVerified: async (id: number) => { await q("mark verified", db.from("raw_dre_page_fetches").update({ verified_at: new Date().toISOString() }).eq("id", id)); },
+  markVerified: async (id: number) => { await w("mark verified", db.from("raw_dre_page_fetches").update({ verified_at: new Date().toISOString() }).eq("id", id)); },
   markFailed: async (id: number, reason: string) => {
-    await q("mark verify_failed", db.from("raw_dre_page_fetches").update({ outcome: "verify_failed", error: `verification: ${reason}` }).eq("id", id));
+    await w("mark verify_failed", db.from("raw_dre_page_fetches").update({ outcome: "verify_failed", error: `verification: ${reason}` }).eq("id", id));
   },
   sleep,
 };
@@ -98,7 +103,7 @@ async function unverified(batchId?: number): Promise<StoredReceipt[]> {
   return out;
 }
 
-async function selftest(): Promise<string[]> {
+async function selftest(batchId: number): Promise<string[]> {
   const checks: string[] = [];
   // Storage round trip.
   const path = `selftest/${new Date().toISOString()}.txt`;
@@ -112,6 +117,17 @@ async function selftest(): Promise<string[]> {
   await q("read receipts", db.from("raw_dre_page_fetches").select("id").limit(1));
   await q("read bulk files", db.from("raw_dre_bulk_files").select("id").limit(1));
   checks.push("Supabase tables: batch row written, receipts and bulk tables readable");
+  // Every write shape a real batch uses: batch update, receipt insert, receipt update, delete.
+  await w("selftest set plan", db.from("raw_dre_fetch_batches").update({ planned_count: 0 }).eq("id", batchId));
+  await w("selftest progress", db.from("raw_dre_fetch_batches").update({ attempted: 0, current_concurrency: 1, last_heartbeat_at: new Date().toISOString() }).eq("id", batchId));
+  await w("selftest log receipt", db.from("raw_dre_page_fetches").insert({
+    batch_id: batchId, license_number: "00000000", requested_url: "selftest", duration_ms: 0, attempts: 1, outcome: "network_error", error: "selftest receipt",
+  }));
+  const [receipt] = await q("selftest read receipt", db.from("raw_dre_page_fetches").select("id").eq("batch_id", batchId).eq("license_number", "00000000"));
+  if (!receipt) throw new Error("selftest receipt not found after insert");
+  await w("selftest mark verified", db.from("raw_dre_page_fetches").update({ verified_at: new Date().toISOString() }).eq("id", receipt.id));
+  await w("selftest delete receipt", db.from("raw_dre_page_fetches").delete().eq("id", receipt.id));
+  checks.push("Supabase writes: batch update, receipt insert, receipt update, delete");
   // DRE bulk file.
   const bulk = await downloadBulkZip();
   const oc = parseBulkZip(bulk.bytes).filter(isOcIndividual).map((r) => r.lic_number.trim());
@@ -161,7 +177,7 @@ async function main() {
   const lines: string[] = [];
   try {
     if (SELFTEST) {
-      lines.push(...(await selftest()).map((c) => `- ✅ ${c}`));
+      lines.push(...(await selftest(batchId)).map((c) => `- ✅ ${c}`));
     } else {
       // 2. Self-heal earlier batches.
       const pending = await unverified();
@@ -196,13 +212,13 @@ async function main() {
       }
       const todo = licenses.filter((l) => !done.has(l)).slice(0, LIMIT);
       log(`OC licenses: ${licenses.length}; already stored: ${done.size}; this batch: ${todo.length}`);
-      await q("set plan", db.from("raw_dre_fetch_batches").update({ bulk_file_id: bulkId, planned_count: todo.length }).eq("id", batchId));
+      await w("set plan", db.from("raw_dre_fetch_batches").update({ bulk_file_id: bulkId, planned_count: todo.length }).eq("id", batchId));
 
       const result = await runFetch(todo, {
         fetchPage,
         storePage: async (path, gz) => { await q("upload page", db.storage.from(BUCKET).upload(path, gz, { contentType: "application/gzip" })); },
-        logPage: async (r: PageReceipt) => { await q("log page", db.from("raw_dre_page_fetches").insert({ batch_id: batchId, ...r })); },
-        progress: async (p) => { await q("progress", db.from("raw_dre_fetch_batches").update({
+        logPage: async (r: PageReceipt) => { await w("log page", db.from("raw_dre_page_fetches").insert({ batch_id: batchId, ...r })); },
+        progress: async (p) => { await w("progress", db.from("raw_dre_fetch_batches").update({
           attempted: p.attempted, ok_count: p.ok, not_found_count: p.not_found, incomplete_count: p.incomplete, error_count: p.errors,
           baseline_ms: p.baseline_ms, median_ms: p.median_ms, p90_ms: p.p90_ms,
           current_concurrency: p.current_concurrency, max_concurrency_used: p.max_concurrency_used,
