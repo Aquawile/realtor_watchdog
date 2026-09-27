@@ -80,6 +80,14 @@ ok('anon cannot write realtors', !!(await fails(null, `update realtors set last_
 await db.exec(`update realtors set employing_broker_name = 'Compass', last_name = 'Hill' where license_number = '00221331'`);
 const hist = (await db.query(`select * from realtor_history`)).rows;
 ok('realtor change logged (only changed fields)', hist.length === 1 && Object.keys(hist[0].new_values).join() === 'employing_broker_name');
+await db.exec(`update realtors set officer_of = '[{"license_number":"01234567","name":"Delanoy Realty Inc"}]' where license_number = '00007012'`);
+ok('brokerage search matches officer corporation', (await as(null,
+  `select license_number from realtors where search_vector @@ plainto_tsquery('simple','delanoy realty')`)).rows[0]?.license_number === '00007012');
+ok('officer_of change logged', (await db.query(`select 1 from realtor_history where license_number = '00007012' and new_values ? 'officer_of'`)).rows.length === 1);
+ok('officer_of must be an array', !!(await db.query(`update realtors set officer_of = '{}' where license_number = '00007012'`).then(() => false, () => true)));
+ok('mark_realtors_seen not callable by anon', !!(await fails(null, `select mark_realtors_seen(array['00007012'], now())`)));
+ok('mark_realtors_seen not callable by users', !!(await fails(users.alice, `select mark_realtors_seen(array['00007012'], now())`)));
+ok('mark_realtors_seen updates', (await db.query(`select mark_realtors_seen(array['00007012','00221331','99999999'], now()) n`)).rows[0].n === 2);
 
 // Reviews.
 const R = '00221331';

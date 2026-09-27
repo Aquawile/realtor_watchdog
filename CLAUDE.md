@@ -6,6 +6,7 @@ Read this file and the PRD docs in `docs/prd/` before doing any work. They are t
 - ALWAYS use `docs/prd/` and this file as context for how the app works.
 - NEVER make assumptions about how something should be built. If anything is unclear, ASK before building.
 - You have permission to use git and to create/edit GitHub Actions workflows (e.g., for cron/scheduled jobs).
+- **All work happens on the `dev` branch.** Merge `dev` into `main` only when the owner explicitly says so.
 - Prefer free tiers everywhere. Do NOT use Google Cloud (GCP) for this project — the owner's GCP credits belong to a different project.
 - Nothing should depend on the owner's own computer running. Hosting is managed services only (no VM, no Docker server).
 
@@ -62,6 +63,9 @@ The platform makes no editorial statements about any realtor or property. It sur
   - The file lists only current licensees (`Licensed` / `Licensed NBA`). A realtor who drops out is kept, with `in_current_dre_file = false`.
   - Profiles are for individuals only (Salesperson, Broker). Corporation/Officer rows are not profiles. Brokerage comes from `related_lic_*`.
   - DRE addresses are often home addresses, so only city/county are stored.
+- **Brokerage for brokers (decided 2026-09-27):** a broker's own DRE row never names a brokerage. Profiles show the corporations they're an officer of (DRE Officer rows → `realtors.officer_of`, possibly several). Independent brokers show none. The Broker Associate List file is not used.
+- **Realtors who leave scope (decided 2026-09-27):** "freeze and flag". If a realtor isn't in today's OC in-scope set, either because they left the DRE file or moved to another county, they get `in_current_dre_file = false` and are no longer updated. The profile and reviews stay. If they come back into scope they're updated and flagged true again.
+- **DRE ingestion:** `scripts/ingest-dre.mts` (`npm run ingest:dre -- --dry-run`), nightly via `.github/workflows/dre-ingest.yml`. Repo secrets `SUPABASE_URL` and `SUPABASE_SECRET_KEY`. It refuses to write if the in-scope count drops below 90% of realtors currently in file.
 - **Schema lives in `supabase/migrations/`.** Behavioral tests: `npm run test:db` (PGlite, no Docker).
 
 ## Stack (agreed)
@@ -79,17 +83,16 @@ The platform makes no editorial statements about any realtor or property. It sur
 - CA DRE licensee data files: https://www.dre.ca.gov/licensees/ (check exact file format and terms of use).
 - Orange County Open GIS Data Portal: https://data-ocpw.opendata.arcgis.com/ (find the exact parcel/assessor layers and confirm terms).
 
-## Current status (Phase 0)
-Done:
-- Next.js scaffold with dependencies installed.
-- PRD docs in `docs/prd/`.
-- git initialized locally.
+## Roadmap
+- **Phase 0 — Scaffold.** Next.js app, PRD docs, GitHub repo, Supabase project. ✅
+- **Phase 1 — Schema.** Supabase migrations + `npm run test:db`. ✅ Pushed to the hosted project with `supabase db push`.
+- **Phase 2 — Auth + data layer.** Supabase Auth (signup with username, login, recovery, 30-min idle timeout), typed data-access functions.
+- **Phase 3 — UI.** Realtor search/profile, review threads, property research pages (responsive).
+- **Phase 4 — Data ingestion + property lookups.** 4a: nightly DRE ingestion via GitHub Actions (pulled forward, done before Phase 2). 4b: cache-aside property lookups (Tier 1 sources).
+- **Phase 5 — Moderation tools.** Report queue, remove/label/dismiss, Verified Client review.
+- **Phase 6 — Pre-launch.** Vercel deploy, security review, performance check (5 s targets), legal/terms pages.
 
-Not done yet (owner must do these, Claude cannot create accounts):
-- Create a GitHub account/repo and connect it as `origin`.
-- Create a Supabase project (free tier) and supply its URL + keys via `.env.local` (never commit secrets).
-- Vercel account/project (later).
-
-Phase 1 (schema) — written and tested locally; see "Decisions made in Phase 1". Applying it to the hosted Supabase project needs the owner to link the CLI (`npx supabase login`, `npx supabase link`) and then `npx supabase db push`.
-
-Original Phase 1 brief: Phase 1 — Postgres schema derived strictly from `docs/prd/` (REQ-001–REQ-010, UC-001–UC-031), adjusted for the MLS cut above. Ask the owner about anything the docs don't settle.
+## Current status
+- Owner setup done: GitHub repo (`origin`), Supabase project (keys in `.env.local`, never committed). Vercel comes later.
+- Phase 4a (DRE ingestion) in progress on `dev`.
+- Local dev note: a stray `node` v20.7 package in the owner's home folder (`~/node_modules/.bin/node`) shadows Node 22 inside `npm run`, so `npm run build` fails locally. The owner chose to leave it. Run Next directly with `node node_modules/next/dist/bin/next build`, or run scripts with `node ...`.

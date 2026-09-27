@@ -1,0 +1,38 @@
+name: DRE ingestion
+
+# Nightly refresh of Orange County realtors from the CA DRE licensee file
+# (updated by DRE daily, overnight Pacific time). Scheduled runs only fire
+# from the default branch (main).
+on:
+  schedule:
+    - cron: "30 10 * * *" # 10:30 UTC = 3:30 AM PDT / 2:30 AM PST
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (read-only, print counts)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dre-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Ingest DRE licensees
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: node scripts/ingest-dre.mts ${{ inputs.dry_run && '--dry-run' || '' }}
