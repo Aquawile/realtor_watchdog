@@ -8,7 +8,10 @@ Read this file and the PRD docs in `docs/prd/` before doing any work. They are t
 - You have permission to use git and to create/edit GitHub Actions workflows (e.g., for cron/scheduled jobs).
 - **Raw first, always.** Every external data source is stored raw and unmodified (exact bytes) before any processing, and processed data lives separately. Data is relational.
 - **First full run of a new source: raw, then stop.** For the very first full run of a source (e.g. all ~49k DRE licensee pages), finish and verify the raw layer, then get the owner's explicit permission before building or running the processed layer. Once approved, later refresh runs may process automatically.
-- **All work happens on the `dev` branch.** Merge `dev` into `main` only when the owner explicitly says so.
+- **All work happens on the `dev` branch.** `dev` reaches `main` only through a pull request, and GitHub enforces it with ruleset "main: merge only through PRs that pass all checks" (id 24196541, no bypass for anyone):
+  - PR required, no direct pushes, no force-pushes, no deleting `main`.
+  - The `checks` job (`.github/workflows/checks.yml`: lint, type-check, all tests with the no-skip gate, build) must pass on an up-to-date branch.
+  - Claude may open and merge `dev` → `main` PRs once every check has passed (owner-approved 2026-09-29). A failed, skipped or cancelled check means no merge. Manual-only data workflows (DRE raw fetch, DRE ingestion) are not PR checks and aren't required.
 - Prefer free tiers everywhere. Do NOT use Google Cloud (GCP) for this project — the owner's GCP credits belong to a different project.
 - Nothing should depend on the owner's own computer running. Hosting is managed services only (no VM, no Docker server).
 
