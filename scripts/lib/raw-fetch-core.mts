@@ -35,14 +35,19 @@ export interface FetchDeps {
 
 export const DEFAULTS = {
   lookupUrl: "https://www2.dre.ca.gov/PublicASP/pplinfo.asp?License_id=",
-  requestTimeoutMs: 30_000,
+  requestTimeoutMs: 15_000,    // hard per-request limit: aborted (then retried) past this
   startConcurrency: 2,
   maxConcurrency: 8,
   window: 10,                  // responses per pacing decision
-  slowRatio: 1.3,              // > 30% over baseline: halve concurrency
-  verySlowRatio: 2.0,          // > 2x baseline: drop to 1 and pause
+  // Hard millisecond guardrails on each window's median DRE response time:
+  // above softLimitMs -> halve concurrency; above hardLimitMs -> drop to 1 and
+  // pause. (DRE normally answers in ~1.1-1.5 s, p90 ~1.9 s.)
+  softLimitMs: 2_500,
+  hardLimitMs: 4_000,
   verySlowPauseMs: 60_000,
-  verySlowStrikes: 3,          // stop after this many very-slow windows in a row
+  // Hard stop: this many slow windows in a row (i.e. still slow after backing
+  // off) and the fetcher terminates itself.
+  slowStreakStop: 2,
   blockStatuses: [403, 429, 503],
   maxConsecutiveErrors: 5,
   maxErrorRate: 0.02,          // after 50 attempts
@@ -90,12 +95,16 @@ export async function runFetch(todo: string[], deps: FetchDeps, s: Settings = DE
   let windowMedian: number | null = null, windowRatio: number | null = null;
   const durations: number[] = [];
   let windowDurations: number[] = [];
+  const normalWindows: number[] = []; // medians of windows within limits
   let baseline: number | null = null;
   let concurrency = Math.min(s.startConcurrency, s.maxConcurrency);
   let maxUsed = concurrency;
   let stopReason: string | null = null;
   let consecutiveErrors = 0;
-  let verySlow = 0;
+  let slowStreak = 0;
+  // Pacing generation: bumped on every back-off, so the next window only
+  // measures requests launched after the back-off (not ones already in flight).
+  let gen = 0;
   let pausedUntil = 0;
   let lastProgress = deps.now();
   const blocks = new Set(s.blockStatuses);
@@ -106,7 +115,7 @@ export async function runFetch(todo: string[], deps: FetchDeps, s: Settings = DE
     window_median_ms: windowMedian, window_ratio: windowRatio,
   });
 
-  const fetchOne = async (license: string) => {
+  const fetchOne = async (license: string, launchGen: number) => {
     const url = s.lookupUrl + license;
     let outcome: Outcome = "network_error";
     let res: PageResponse | null = null;
@@ -167,38 +176,50 @@ export async function runFetch(todo: string[], deps: FetchDeps, s: Settings = DE
     // Pacing: only complete responses count toward DRE's response time.
     if (outcome !== "ok" && outcome !== "not_found") return;
     durations.push(ms);
+    if (launchGen !== gen) return; // launched before the last back-off
     windowDurations.push(ms);
-    if (baseline === null) {
-      if (durations.length >= s.window) {
-        baseline = Math.round(median(durations));
-        windowDurations = [];
-        deps.log(`baseline response time: ${baseline} ms`);
+    if (windowDurations.length < s.window) return;
+    const m = Math.round(median(windowDurations));
+    windowDurations = [];
+
+    // Decisions use absolute milliseconds only. The baseline (median of the
+    // windows that were within limits) is reported for monitoring, never used
+    // to decide, so a slow start can't blind the guardrail.
+    const verySlow = m > s.hardLimitMs;
+    const slow = verySlow || m > s.softLimitMs;
+    if (!slow) {
+      normalWindows.push(m);
+      const b = Math.round(median(normalWindows));
+      if (baseline === null) deps.log(`baseline response time: ${b} ms`);
+      baseline = b;
+    }
+    windowMedian = m;
+    windowRatio = baseline ? Math.round((m / baseline) * 100) / 100 : null;
+    const why = `window median ${m} ms (soft limit ${s.softLimitMs} ms, hard limit ${s.hardLimitMs} ms` +
+      (baseline ? `, normal ~${baseline} ms` : "") + ")";
+    const before = concurrency;
+
+    if (slow) {
+      // Hard stop: still slow in the first window measured after backing off.
+      if (++slowStreak >= s.slowStreakStop) {
+        throw new GuardrailStop(`hard stop: DRE still slow after backing off ${slowStreak - 1}x: ${why}`);
       }
+      if (verySlow) {
+        concurrency = 1;
+        pausedUntil = deps.now() + s.verySlowPauseMs;
+      } else {
+        concurrency = Math.max(1, Math.floor(concurrency / 2));
+      }
+      gen++; // measure only requests launched from now on
+      deps.log(`${verySlow ? "VERY SLOW" : "SLOW"}: ${why}: concurrency ${before} -> ${concurrency}` +
+        (verySlow ? `, pausing ${s.verySlowPauseMs / 1000}s` : "") + `; hard stop if the next window is still slow`);
       return;
     }
-    if (windowDurations.length < s.window) return;
-    const m = median(windowDurations);
-    windowDurations = [];
-    const ratio = m / baseline;
-    windowMedian = Math.round(m);
-    windowRatio = Math.round(ratio * 100) / 100;
-    const before = concurrency;
-    if (ratio > s.verySlowRatio) {
-      concurrency = 1;
-      pausedUntil = deps.now() + s.verySlowPauseMs;
-      if (++verySlow >= s.verySlowStrikes) throw new GuardrailStop(`DRE stayed > ${s.verySlowRatio}x slower than baseline for ${verySlow} windows`);
-    } else if (ratio > s.slowRatio) {
-      concurrency = Math.max(1, Math.floor(concurrency / 2));
-      verySlow = 0;
-    } else {
-      concurrency = Math.min(s.maxConcurrency, concurrency + 1);
-      verySlow = 0;
-    }
+
+    slowStreak = 0;
+    concurrency = Math.min(s.maxConcurrency, concurrency + 1);
     maxUsed = Math.max(maxUsed, concurrency);
-    if (concurrency !== before || ratio > s.slowRatio) {
-      deps.log(`window median ${Math.round(m)} ms (${ratio.toFixed(2)}x baseline): concurrency ${before} -> ${concurrency}` +
-        (pausedUntil > deps.now() ? `, pausing ${s.verySlowPauseMs / 1000}s` : ""));
-    }
+    if (concurrency !== before) deps.log(`${why}: concurrency ${before} -> ${concurrency}`);
   };
 
   // Worker pool whose size follows `concurrency`.
@@ -210,7 +231,7 @@ export async function runFetch(todo: string[], deps: FetchDeps, s: Settings = DE
     if (deps.now() - startedAt > s.maxMinutes * 60_000) stopReason ??= `reached time limit of ${s.maxMinutes} min`;
     const canLaunch = !stopReason && deps.now() >= pausedUntil;
     while (canLaunch && queue.length && inFlight.size < concurrency) {
-      const p: Promise<void> = fetchOne(queue.shift()!)
+      const p: Promise<void> = fetchOne(queue.shift()!, gen)
         .catch((e) => { if (e instanceof GuardrailStop) stopReason ??= e.message; else fatal ??= e; })
         .finally(() => { inFlight.delete(p); });
       inFlight.add(p);

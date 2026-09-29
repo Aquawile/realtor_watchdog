@@ -28,8 +28,10 @@
 //
 // Pacing settings come from environment variables (GitHub repository
 // variables in CI), falling back to DEFAULTS in scripts/lib/raw-fetch-core.mts:
-//   DRE_START_CONCURRENCY, DRE_MAX_CONCURRENCY, DRE_WINDOW, DRE_SLOW_RATIO,
-//   DRE_VERY_SLOW_RATIO, DRE_VERY_SLOW_PAUSE_MS, DRE_VERY_SLOW_STRIKES,
+//   DRE_START_CONCURRENCY, DRE_MAX_CONCURRENCY, DRE_WINDOW,
+//   DRE_SOFT_LIMIT_MS, DRE_HARD_LIMIT_MS (hard millisecond guardrails),
+//   DRE_VERY_SLOW_PAUSE_MS,
+//   DRE_SLOW_STREAK_STOP (self-terminate after this many slow windows in a row),
 //   DRE_MAX_CONSECUTIVE_ERRORS, DRE_MAX_ERROR_RATE, DRE_REQUEST_TIMEOUT_MS,
 //   DRE_VERIFY_CONCURRENCY
 // --max-concurrency / --max-minutes on the command line override them.
@@ -71,17 +73,19 @@ const settings = {
   startConcurrency: envNum("DRE_START_CONCURRENCY", DEFAULTS.startConcurrency),
   maxConcurrency: numArg("max-concurrency", envNum("DRE_MAX_CONCURRENCY", DEFAULTS.maxConcurrency))!,
   window: envNum("DRE_WINDOW", DEFAULTS.window),
-  slowRatio: envNum("DRE_SLOW_RATIO", DEFAULTS.slowRatio),
-  verySlowRatio: envNum("DRE_VERY_SLOW_RATIO", DEFAULTS.verySlowRatio),
+  softLimitMs: envNum("DRE_SOFT_LIMIT_MS", DEFAULTS.softLimitMs),
+  hardLimitMs: envNum("DRE_HARD_LIMIT_MS", DEFAULTS.hardLimitMs),
   verySlowPauseMs: envNum("DRE_VERY_SLOW_PAUSE_MS", DEFAULTS.verySlowPauseMs),
-  verySlowStrikes: envNum("DRE_VERY_SLOW_STRIKES", DEFAULTS.verySlowStrikes),
+  slowStreakStop: envNum("DRE_SLOW_STREAK_STOP", DEFAULTS.slowStreakStop),
   maxConsecutiveErrors: envNum("DRE_MAX_CONSECUTIVE_ERRORS", DEFAULTS.maxConsecutiveErrors),
   maxErrorRate: envNum("DRE_MAX_ERROR_RATE", DEFAULTS.maxErrorRate),
   requestTimeoutMs: envNum("DRE_REQUEST_TIMEOUT_MS", DEFAULTS.requestTimeoutMs),
   maxMinutes: numArg("max-minutes", DEFAULTS.maxMinutes)!,
 };
 const VERIFY_CONCURRENCY = envNum("DRE_VERIFY_CONCURRENCY", 10);
-if (settings.slowRatio >= settings.verySlowRatio) throw new Error("DRE_SLOW_RATIO must be below DRE_VERY_SLOW_RATIO");
+if (settings.softLimitMs >= settings.hardLimitMs) throw new Error("DRE_SOFT_LIMIT_MS must be below DRE_HARD_LIMIT_MS");
+if (settings.hardLimitMs >= settings.requestTimeoutMs) throw new Error("DRE_HARD_LIMIT_MS must be below DRE_REQUEST_TIMEOUT_MS");
+if (!Number.isInteger(settings.slowStreakStop) || settings.slowStreakStop < 1) throw new Error("DRE_SLOW_STREAK_STOP must be a whole number >= 1");
 if (settings.startConcurrency > settings.maxConcurrency) settings.startConcurrency = settings.maxConcurrency;
 
 const url = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -253,7 +257,9 @@ async function main() {
       const firstPos = todo.length ? licenses.indexOf(todo[0]) + 1 : 0;
       log(`OC licenses: ${licenses.length}; already stored: ${done.size}; this batch: ${todo.length} (licenses ${range}, starting at #${firstPos} of the sorted list)`);
       log(`pacing: start ${settings.startConcurrency}, max ${settings.maxConcurrency} parallel; window ${settings.window}; ` +
-        `halve above ${settings.slowRatio}x baseline, pause ${settings.verySlowPauseMs / 1000}s above ${settings.verySlowRatio}x; verify ${VERIFY_CONCURRENCY} parallel`);
+        `halve above ${settings.softLimitMs} ms; ` +
+        `drop to 1 + pause ${settings.verySlowPauseMs / 1000}s above ${settings.hardLimitMs} ms; ` +
+        `HARD STOP after ${settings.slowStreakStop} slow windows in a row; per-request timeout ${settings.requestTimeoutMs} ms; verify ${VERIFY_CONCURRENCY} parallel`);
       await w("set plan", db.from("raw_dre_fetch_batches").update({
         bulk_file_id: bulkId, planned_count: todo.length, first_license: todo[0] ?? null, last_license: todo[todo.length - 1] ?? null,
       }).eq("id", batchId));
