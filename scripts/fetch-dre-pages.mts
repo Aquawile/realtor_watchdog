@@ -13,8 +13,10 @@
 //   3. Store an exact copy of today's bulk file (skipped if unchanged).
 //   4. Fetch up to --limit licenses not yet stored as ok/not_found, with the
 //      pacing guardrail (see scripts/lib/raw-fetch-core.mts).
-//   5. Verify every file stored by this batch (download, gunzip, checksum).
-//      Mismatches become 'verify_failed' and are fetched again next batch.
+//      Each stored file is verified inline, in parallel: read back, gunzip,
+//      checksum against what DRE sent. Mismatches become 'verify_failed' and
+//      are fetched again by the next batch.
+//   5. Confirm no file from this batch was left unverified.
 //
 // Usage:
 //   node --env-file=.env.local scripts/fetch-dre-pages.mts --selftest
@@ -24,13 +26,21 @@
 // Supabase tables + Storage (write, read back, delete), the DRE bulk file,
 // and one DRE lookup page.
 //
+// Pacing settings come from environment variables (GitHub repository
+// variables in CI), falling back to DEFAULTS in scripts/lib/raw-fetch-core.mts:
+//   DRE_START_CONCURRENCY, DRE_MAX_CONCURRENCY, DRE_WINDOW, DRE_SLOW_RATIO,
+//   DRE_VERY_SLOW_RATIO, DRE_VERY_SLOW_PAUSE_MS, DRE_VERY_SLOW_STRIKES,
+//   DRE_MAX_CONSECUTIVE_ERRORS, DRE_MAX_ERROR_RATE, DRE_REQUEST_TIMEOUT_MS,
+//   DRE_VERIFY_CONCURRENCY
+// --max-concurrency / --max-minutes on the command line override them.
+//
 // Exit codes: 0 completed, 1 failed (crash / verification failures), 2 stopped by a guardrail.
 
 import { createClient } from "@supabase/supabase-js";
 import { appendFileSync } from "node:fs";
 import { BULK_SOURCE_URL, downloadBulkZip, isOcIndividual, parseBulkZip } from "./lib/dre-bulk.mts";
 import {
-  DEFAULTS, classify, median, p90, runFetch, sha256, verifyStored,
+  DEFAULTS, classify, median, p90, runFetch, sha256, verifyStored, withRetry,
   type FetchResult, type PageReceipt, type StoredReceipt,
 } from "./lib/raw-fetch-core.mts";
 
@@ -49,11 +59,30 @@ function numArg(name: string, fallback?: number): number | undefined {
 const SELFTEST = process.argv.includes("--selftest");
 const LIMIT = numArg("limit");
 if (!SELFTEST && !LIMIT) throw new Error("pass --limit <n> or --selftest");
+function envNum(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v <= 0) throw new Error(`environment variable ${name}=${raw} is not a positive number`);
+  return v;
+}
 const settings = {
   ...DEFAULTS,
-  maxConcurrency: numArg("max-concurrency", DEFAULTS.maxConcurrency)!,
+  startConcurrency: envNum("DRE_START_CONCURRENCY", DEFAULTS.startConcurrency),
+  maxConcurrency: numArg("max-concurrency", envNum("DRE_MAX_CONCURRENCY", DEFAULTS.maxConcurrency))!,
+  window: envNum("DRE_WINDOW", DEFAULTS.window),
+  slowRatio: envNum("DRE_SLOW_RATIO", DEFAULTS.slowRatio),
+  verySlowRatio: envNum("DRE_VERY_SLOW_RATIO", DEFAULTS.verySlowRatio),
+  verySlowPauseMs: envNum("DRE_VERY_SLOW_PAUSE_MS", DEFAULTS.verySlowPauseMs),
+  verySlowStrikes: envNum("DRE_VERY_SLOW_STRIKES", DEFAULTS.verySlowStrikes),
+  maxConsecutiveErrors: envNum("DRE_MAX_CONSECUTIVE_ERRORS", DEFAULTS.maxConsecutiveErrors),
+  maxErrorRate: envNum("DRE_MAX_ERROR_RATE", DEFAULTS.maxErrorRate),
+  requestTimeoutMs: envNum("DRE_REQUEST_TIMEOUT_MS", DEFAULTS.requestTimeoutMs),
   maxMinutes: numArg("max-minutes", DEFAULTS.maxMinutes)!,
 };
+const VERIFY_CONCURRENCY = envNum("DRE_VERIFY_CONCURRENCY", 10);
+if (settings.slowRatio >= settings.verySlowRatio) throw new Error("DRE_SLOW_RATIO must be below DRE_VERY_SLOW_RATIO");
+if (settings.startConcurrency > settings.maxConcurrency) settings.startConcurrency = settings.maxConcurrency;
 
 const url = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
 const key = process.env.SUPABASE_SECRET_KEY;
@@ -81,14 +110,23 @@ async function fetchPage(pageUrl: string, timeoutMs: number) {
   return { status: res.status, headers: Object.fromEntries(res.headers), bytes: new Uint8Array(await res.arrayBuffer()) };
 }
 
-const verifyDeps = {
-  download: async (path: string) => new Uint8Array(await (await q("download", db.storage.from(BUCKET).download(path))).arrayBuffer()),
-  markVerified: async (id: number) => { await w("mark verified", db.from("raw_dre_page_fetches").update({ verified_at: new Date().toISOString() }).eq("id", id)); },
-  markFailed: async (id: number, reason: string) => {
-    await w("mark verify_failed", db.from("raw_dre_page_fetches").update({ outcome: "verify_failed", error: `verification: ${reason}` }).eq("id", id));
-  },
-  sleep,
-};
+const downloadStored = async (path: string) =>
+  new Uint8Array(await (await q("download", db.storage.from(BUCKET).download(path))).arrayBuffer());
+
+// Verify stored files in parallel and record the results (one write per 200 verified).
+async function verifyAndRecord(receipts: StoredReceipt[]) {
+  const { verifiedIds, failed } = await verifyStored(receipts, downloadStored, sleep, VERIFY_CONCURRENCY);
+  const at = new Date().toISOString();
+  for (let i = 0; i < verifiedIds.length; i += 200) {
+    const ids = verifiedIds.slice(i, i + 200);
+    await withRetry("mark verified", () => w("mark verified", db.from("raw_dre_page_fetches").update({ verified_at: at }).in("id", ids)), 3, sleep);
+  }
+  for (const f of failed) {
+    await withRetry("mark verify_failed", () => w("mark verify_failed", db.from("raw_dre_page_fetches")
+      .update({ outcome: "verify_failed", error: `verification: ${f.reason}` }).eq("id", f.id)), 3, sleep);
+  }
+  return { verified: verifiedIds.length, failed: failed.length };
+}
 
 async function unverified(batchId?: number): Promise<StoredReceipt[]> {
   const out: StoredReceipt[] = [];
@@ -182,7 +220,7 @@ async function main() {
       // 2. Self-heal earlier batches.
       const pending = await unverified();
       if (pending.length) {
-        const v = await verifyStored(pending, verifyDeps);
+        const v = await verifyAndRecord(pending);
         lines.push(`- Earlier unverified files: ${v.verified} verified, ${v.failed} failed (will be re-fetched)`);
       }
 
@@ -211,15 +249,24 @@ async function main() {
         if (page.length < 1000) break;
       }
       const todo = licenses.filter((l) => !done.has(l)).slice(0, LIMIT);
-      log(`OC licenses: ${licenses.length}; already stored: ${done.size}; this batch: ${todo.length}`);
-      await w("set plan", db.from("raw_dre_fetch_batches").update({ bulk_file_id: bulkId, planned_count: todo.length }).eq("id", batchId));
+      const range = todo.length ? `${todo[0]} to ${todo[todo.length - 1]}` : "none";
+      const firstPos = todo.length ? licenses.indexOf(todo[0]) + 1 : 0;
+      log(`OC licenses: ${licenses.length}; already stored: ${done.size}; this batch: ${todo.length} (licenses ${range}, starting at #${firstPos} of the sorted list)`);
+      log(`pacing: start ${settings.startConcurrency}, max ${settings.maxConcurrency} parallel; window ${settings.window}; ` +
+        `halve above ${settings.slowRatio}x baseline, pause ${settings.verySlowPauseMs / 1000}s above ${settings.verySlowRatio}x; verify ${VERIFY_CONCURRENCY} parallel`);
+      await w("set plan", db.from("raw_dre_fetch_batches").update({
+        bulk_file_id: bulkId, planned_count: todo.length, first_license: todo[0] ?? null, last_license: todo[todo.length - 1] ?? null,
+      }).eq("id", batchId));
+      lines.push(`- Licenses ${range} (#${firstPos}–#${firstPos + todo.length - 1} of ${licenses.length}; ${done.size} were already stored)`);
 
       const result = await runFetch(todo, {
         fetchPage,
         storePage: async (path, gz) => { await q("upload page", db.storage.from(BUCKET).upload(path, gz, { contentType: "application/gzip" })); },
+        downloadStored,
         logPage: async (r: PageReceipt) => { await w("log page", db.from("raw_dre_page_fetches").insert({ batch_id: batchId, ...r })); },
         progress: async (p) => { await w("progress", db.from("raw_dre_fetch_batches").update({
           attempted: p.attempted, ok_count: p.ok, not_found_count: p.not_found, incomplete_count: p.incomplete, error_count: p.errors,
+          verify_failed_count: p.verify_failed, window_median_ms: p.window_median_ms, window_ratio: p.window_ratio,
           baseline_ms: p.baseline_ms, median_ms: p.median_ms, p90_ms: p.p90_ms,
           current_concurrency: p.current_concurrency, max_concurrency_used: p.max_concurrency_used,
           last_heartbeat_at: new Date().toISOString() }).eq("id", batchId)); },
@@ -229,14 +276,20 @@ async function main() {
       status = result.status;
       stopReason = result.stopReason;
       const st = result.stats;
-      lines.push(`| attempted | ok | not found | incomplete | errors | baseline | median | p90 | max parallel |`,
-        `|---|---|---|---|---|---|---|---|---|`,
-        `| ${st.attempted} | ${st.ok} | ${st.not_found} | ${st.incomplete} | ${st.errors} | ${result.baseline ?? "-"} ms | ${Math.round(median(result.durations))} ms | ${Math.round(p90(result.durations))} ms | ${result.maxUsed} |`);
+      lines.push(`| attempted | ok | not found | incomplete | errors | verify failed | baseline | median | p90 | max parallel |`,
+        `|---|---|---|---|---|---|---|---|---|---|`,
+        `| ${st.attempted} | ${st.ok} | ${st.not_found} | ${st.incomplete} | ${st.errors} | ${st.verify_failed} | ${result.baseline ?? "-"} ms | ${Math.round(median(result.durations))} ms | ${Math.round(p90(result.durations))} ms | ${result.maxUsed} |`);
 
-      // 5. Verify this batch's files.
-      const v = await verifyStored(await unverified(batchId), verifyDeps);
-      lines.push(`- Verification: ${v.verified} files byte-identical to what DRE sent, ${v.failed} failed`);
-      if (v.failed && status === "completed") { status = "failed"; stopReason = `${v.failed} stored files failed verification (queued for re-fetch)`; }
+      // 5. Every stored file of this batch must have been verified inline.
+      const leftover = await unverified(batchId);
+      if (leftover.length) {
+        const v = await verifyAndRecord(leftover);
+        lines.push(`- ${leftover.length} files were not verified inline; verified now: ${v.verified} ok, ${v.failed} failed`);
+        st.verify_failed += v.failed;
+      }
+      const storedCount = st.ok + st.not_found + st.incomplete;
+      lines.push(`- Verification: ${storedCount} stored files byte-identical to what DRE sent, ${st.verify_failed} failed (re-fetched next batch)`);
+      if (st.verify_failed && status === "completed") { status = "failed"; stopReason = `${st.verify_failed} stored files failed verification (queued for re-fetch)`; }
       if (st.incomplete) lines.push(`- ${st.incomplete} incomplete pages were stored for inspection and will be re-fetched`);
     }
   } catch (e) {

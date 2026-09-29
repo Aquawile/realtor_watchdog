@@ -16,9 +16,9 @@ on:
         type: number
         default: 100
       max_concurrency:
-        description: "Maximum parallel requests to DRE (the guardrail may use fewer)"
-        type: number
-        default: 8
+        description: "Override max parallel requests for this run (blank = repository variable DRE_MAX_CONCURRENCY)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -53,12 +53,27 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           MODE: ${{ inputs.mode }}
           LIMIT: ${{ inputs.limit }}
-          MAX_CONCURRENCY: ${{ inputs.max_concurrency }}
+          MAX_CONCURRENCY_OVERRIDE: ${{ inputs.max_concurrency }}
+          # Pacing guardrail, tunable in Settings -> Secrets and variables -> Actions -> Variables.
+          # Unset variables fall back to the tested defaults in scripts/lib/raw-fetch-core.mts.
+          DRE_START_CONCURRENCY: ${{ vars.DRE_START_CONCURRENCY }}
+          DRE_MAX_CONCURRENCY: ${{ vars.DRE_MAX_CONCURRENCY }}
+          DRE_WINDOW: ${{ vars.DRE_WINDOW }}
+          DRE_SLOW_RATIO: ${{ vars.DRE_SLOW_RATIO }}
+          DRE_VERY_SLOW_RATIO: ${{ vars.DRE_VERY_SLOW_RATIO }}
+          DRE_VERY_SLOW_PAUSE_MS: ${{ vars.DRE_VERY_SLOW_PAUSE_MS }}
+          DRE_VERY_SLOW_STRIKES: ${{ vars.DRE_VERY_SLOW_STRIKES }}
+          DRE_MAX_CONSECUTIVE_ERRORS: ${{ vars.DRE_MAX_CONSECUTIVE_ERRORS }}
+          DRE_MAX_ERROR_RATE: ${{ vars.DRE_MAX_ERROR_RATE }}
+          DRE_REQUEST_TIMEOUT_MS: ${{ vars.DRE_REQUEST_TIMEOUT_MS }}
+          DRE_VERIFY_CONCURRENCY: ${{ vars.DRE_VERIFY_CONCURRENCY }}
         run: |
           if [ "$MODE" = "selftest" ]; then
             node scripts/fetch-dre-pages.mts --selftest
+          elif [ -n "$MAX_CONCURRENCY_OVERRIDE" ]; then
+            node scripts/fetch-dre-pages.mts --limit "$LIMIT" --max-concurrency "$MAX_CONCURRENCY_OVERRIDE" --max-minutes 300
           else
-            node scripts/fetch-dre-pages.mts --limit "$LIMIT" --max-concurrency "$MAX_CONCURRENCY" --max-minutes 300
+            node scripts/fetch-dre-pages.mts --limit "$LIMIT" --max-minutes 300
           fi
       - name: Note abnormal end
         if: failure() || cancelled()
