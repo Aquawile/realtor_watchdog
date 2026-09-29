@@ -20,10 +20,15 @@ const TRUNCATED_PAGE = enc("<html><table><tr><td>License Type:");
 
 type Scenario = (license: string, attempt: number, index: number) => { latency: number; status?: number; body?: Uint8Array; throws?: string };
 
-function harness(scenario: Scenario, opts: { storeFailures?: (path: string, attempt: number) => boolean; stop?: () => string | null } = {}) {
+function harness(scenario: Scenario, opts: {
+  storeFailures?: (path: string, attempt: number) => boolean;
+  corrupt?: (path: string) => boolean;            // storage silently keeps different bytes
+  stop?: () => string | null;
+} = {}) {
   const files = new Map<string, Uint8Array>();
   const receipts: PageReceipt[] = [];
   const logs: string[] = [];
+  const progress: import("../lib/raw-fetch-core.mts").Progress[] = [];
   const attempts = new Map<string, number>();
   const storeAttempts = new Map<string, number>();
   let started = 0;
@@ -41,14 +46,19 @@ function harness(scenario: Scenario, opts: { storeFailures?: (path: string, atte
       const n = (storeAttempts.get(path) ?? 0) + 1;
       storeAttempts.set(path, n);
       if (opts.storeFailures?.(path, n)) throw new Error("simulated storage outage");
-      files.set(path, gz);
+      files.set(path, opts.corrupt?.(path) ? gzipSync(enc("tampered")) : gz);
+    },
+    async downloadStored(path) {
+      const f = files.get(path);
+      if (!f) throw new Error("object not found");
+      return f;
     },
     async logPage(r) { receipts.push(r); },
-    async progress() {},
+    async progress(p) { progress.push(p); },
     now, sleep, isoNow: () => new Date().toISOString() + Math.random().toString(36).slice(2, 6), log: (m) => logs.push(m),
     externalStop: opts.stop ?? (() => null),
   };
-  return { deps, files, receipts, logs, attempts };
+  return { deps, files, receipts, logs, attempts, progress };
 }
 
 const licenses = (n: number) => Array.from({ length: n }, (_, i) => String(10_000_000 + i));
@@ -65,6 +75,8 @@ test("completes a batch and stores every page byte-for-byte", async () => {
     const raw = gunzipSync(h.files.get(rec.storage_path!)!);
     assert.equal(sha256(raw), rec.sha256_raw);
     assert.deepEqual(new Uint8Array(raw), OK_PAGE(rec.license_number));
+    assert.ok(rec.verified_at, "verified inline");
+    assert.equal(rec.outcome, "ok");
   }
 });
 
@@ -171,21 +183,46 @@ test("stops at the time limit", async () => {
   assert.match(r.stopReason!, /time limit/);
 });
 
-test("verification passes identical files and catches corrupt or missing ones", async () => {
+test("catches a stored file that doesn't match what DRE sent, and keeps going", async () => {
+  const h = harness(() => ({ latency: 1000 }), { corrupt: (p) => p.includes("/10000004/") });
+  const r = await runFetch(licenses(20), h.deps, S());
+  assert.equal(r.status, "completed");
+  assert.equal(r.stats.verify_failed, 1);
+  assert.equal(r.stats.ok, 19);
+  const bad = h.receipts.find((x) => x.license_number === "10000004")!;
+  assert.equal(bad.outcome, "verify_failed");
+  assert.equal(bad.verified_at, null);
+  assert.match(bad.error!, /verification: (size|checksum)/);
+});
+
+test("reports DRE's live response-time ratio for monitoring", async () => {
+  const h = harness(() => ({ latency: 1000 }));
+  await runFetch(licenses(60), h.deps, S({ progressEveryMs: 1 }));
+  const withRatio = h.progress.filter((p) => p.window_ratio !== null);
+  assert.ok(withRatio.length > 0);
+  for (const p of withRatio) assert.ok(p.window_ratio! > 0.7 && p.window_ratio! < 1.3, `ratio ${p.window_ratio}`);
+  assert.ok(withRatio.every((p) => p.window_median_ms! > 700 && p.window_median_ms! < 1300));
+});
+
+test("verifies existing files in parallel and catches corrupt or missing ones", async () => {
   const good = enc("page A"), bad = enc("page B");
   const store = new Map<string, Uint8Array>([["a", gzipSync(good)], ["b", gzipSync(enc("page B tampered"))]]);
-  const verified: number[] = [], failed: [number, string][] = [];
+  const many = Array.from({ length: 40 }, (_, i) => ({ id: 100 + i, storage_path: "a", sha256_raw: sha256(good), byte_size: good.length }));
+  let active = 0, peak = 0;
+  const download = async (p: string) => {
+    active++; peak = Math.max(peak, active);
+    await sleep(200);
+    active--;
+    const f = store.get(p);
+    if (!f) throw new Error("not found");
+    return f;
+  };
   const v = await verifyStored([
-    { id: 1, storage_path: "a", sha256_raw: sha256(good), byte_size: good.length },
+    ...many,
     { id: 2, storage_path: "b", sha256_raw: sha256(bad), byte_size: bad.length },
     { id: 3, storage_path: "missing", sha256_raw: sha256(good), byte_size: good.length },
-  ], {
-    download: async (p) => { const f = store.get(p); if (!f) throw new Error("not found"); return f; },
-    markVerified: async (id) => { verified.push(id); },
-    markFailed: async (id, reason) => { failed.push([id, reason]); },
-    sleep,
-  });
-  assert.deepEqual(v, { verified: 1, failed: 2 });
-  assert.deepEqual(verified, [1]);
-  assert.deepEqual(failed.map(([id]) => id), [2, 3]);
+  ], download, sleep, 10);
+  assert.equal(v.verifiedIds.length, 40);
+  assert.deepEqual(v.failed.map((f) => f.id).sort(), [2, 3]);
+  assert.ok(peak > 1 && peak <= 10, `parallel downloads peaked at ${peak}`);
 });

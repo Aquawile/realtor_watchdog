@@ -5,22 +5,25 @@ import { createHash } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 export type PageResponse = { status: number; headers: Record<string, string>; bytes: Uint8Array };
-export type Outcome = "ok" | "not_found" | "incomplete" | "http_error" | "network_error";
+export type Outcome = "ok" | "not_found" | "incomplete" | "http_error" | "network_error" | "verify_failed";
 
 export type PageReceipt = {
   license_number: string; requested_url: string; duration_ms: number; attempts: number;
   http_status: number | null; response_headers: Record<string, string> | null; byte_size: number | null;
   sha256_raw: string | null; storage_path: string | null; outcome: Outcome; error: string | null;
+  verified_at: string | null;
 };
 
-export type Stats = { attempted: number; ok: number; not_found: number; incomplete: number; errors: number };
+export type Stats = { attempted: number; ok: number; not_found: number; incomplete: number; errors: number; verify_failed: number };
 
 export type Progress = Stats & { baseline_ms: number | null; median_ms: number | null; p90_ms: number | null;
-  current_concurrency: number; max_concurrency_used: number };
+  current_concurrency: number; max_concurrency_used: number;
+  window_median_ms: number | null; window_ratio: number | null }; // latest pacing window vs baseline
 
 export interface FetchDeps {
   fetchPage(url: string, timeoutMs: number): Promise<PageResponse>; // throws on network failure
   storePage(path: string, gzipped: Uint8Array): Promise<void>;
+  downloadStored(path: string): Promise<Uint8Array>; // read back for verification
   logPage(receipt: PageReceipt): Promise<void>;
   progress(p: Progress): Promise<void>;
   now(): number;                    // ms
@@ -83,7 +86,8 @@ export type FetchResult = {
 
 export async function runFetch(todo: string[], deps: FetchDeps, s: Settings = DEFAULTS): Promise<FetchResult> {
   const startedAt = deps.now();
-  const stats: Stats = { attempted: 0, ok: 0, not_found: 0, incomplete: 0, errors: 0 };
+  const stats: Stats = { attempted: 0, ok: 0, not_found: 0, incomplete: 0, errors: 0, verify_failed: 0 };
+  let windowMedian: number | null = null, windowRatio: number | null = null;
   const durations: number[] = [];
   let windowDurations: number[] = [];
   let baseline: number | null = null;
@@ -99,6 +103,7 @@ export async function runFetch(todo: string[], deps: FetchDeps, s: Settings = DE
   const progress = () => deps.progress({
     ...stats, baseline_ms: baseline, median_ms: durations.length ? Math.round(median(durations)) : null,
     p90_ms: durations.length ? Math.round(p90(durations)) : null, current_concurrency: concurrency, max_concurrency_used: maxUsed,
+    window_median_ms: windowMedian, window_ratio: windowRatio,
   });
 
   const fetchOne = async (license: string) => {
@@ -128,20 +133,27 @@ export async function runFetch(todo: string[], deps: FetchDeps, s: Settings = DE
 
     const stored = outcome === "ok" || outcome === "not_found" || outcome === "incomplete";
     const path = stored ? `pages/${license}/${deps.isoNow()}.html.gz` : null;
+    const rawSha = stored ? sha256(res!.bytes) : null;
+    let verifiedAt: string | null = null;
     if (stored) {
       const gz = gzipSync(res!.bytes, { level: 9 });
       await withRetry(`upload ${license}`, () => deps.storePage(path!, gz), s.storageRetries, deps.sleep);
+      // Verify inline: read the stored file back and compare with what DRE sent.
+      const problem = await checkStored(path!, rawSha!, res!.bytes.length, deps.downloadStored, s.storageRetries, deps.sleep);
+      if (problem) { outcome = "verify_failed"; error = `verification: ${problem}`; }
+      else verifiedAt = deps.isoNow();
     }
     await withRetry(`log ${license}`, () => deps.logPage({
       license_number: license, requested_url: url, duration_ms: ms, attempts,
       http_status: res?.status ?? null, response_headers: res?.headers ?? null, byte_size: res?.bytes.length ?? null,
-      sha256_raw: stored ? sha256(res!.bytes) : null, storage_path: path, outcome, error,
+      sha256_raw: rawSha, storage_path: path, outcome, error, verified_at: verifiedAt,
     }), s.storageRetries, deps.sleep);
 
     stats.attempted++;
     if (outcome === "ok") stats.ok++;
     else if (outcome === "not_found") stats.not_found++;
     else if (outcome === "incomplete") stats.incomplete++;
+    else if (outcome === "verify_failed") stats.verify_failed++;
     else stats.errors++;
 
     if (res && blocks.has(res.status)) throw new GuardrailStop(`DRE returned HTTP ${res.status} for ${license}: possible rate limit or block`);
@@ -168,6 +180,8 @@ export async function runFetch(todo: string[], deps: FetchDeps, s: Settings = DE
     const m = median(windowDurations);
     windowDurations = [];
     const ratio = m / baseline;
+    windowMedian = Math.round(m);
+    windowRatio = Math.round(ratio * 100) / 100;
     const before = concurrency;
     if (ratio > s.verySlowRatio) {
       concurrency = 1;
@@ -219,28 +233,33 @@ export async function runFetch(todo: string[], deps: FetchDeps, s: Settings = DE
 }
 
 // ---- Verification: prove every stored file is byte-identical to what DRE sent.
-export type StoredReceipt = { id: number; storage_path: string; sha256_raw: string; byte_size: number };
-export interface VerifyDeps {
-  download(path: string): Promise<Uint8Array>;   // gzipped bytes as stored
-  markVerified(id: number): Promise<void>;
-  markFailed(id: number, reason: string): Promise<void>; // receipt becomes 'verify_failed' -> re-fetched later
-  sleep(ms: number): Promise<void>;
+// Returns null if the stored file matches, otherwise the reason.
+export async function checkStored(path: string, sha: string, size: number, download: (p: string) => Promise<Uint8Array>,
+  retries: number, sleep: (ms: number) => Promise<void>): Promise<string | null> {
+  try {
+    const raw = gunzipSync(await withRetry(`download ${path}`, () => download(path), retries, sleep));
+    if (raw.length !== size) return `size ${raw.length} != ${size}`;
+    if (sha256(raw) !== sha) return "checksum mismatch";
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
 }
 
-export async function verifyStored(receipts: StoredReceipt[], deps: VerifyDeps, retries = 3) {
-  let verified = 0, failed = 0;
-  for (const r of receipts) {
-    let reason: string | null = null;
-    try {
-      const gz = await withRetry(`download ${r.storage_path}`, () => deps.download(r.storage_path), retries, deps.sleep);
-      const raw = gunzipSync(gz);
-      if (raw.length !== r.byte_size) reason = `size ${raw.length} != ${r.byte_size}`;
-      else if (sha256(raw) !== r.sha256_raw) reason = "checksum mismatch";
-    } catch (e) {
-      reason = e instanceof Error ? e.message : String(e);
+export type StoredReceipt = { id: number; storage_path: string; sha256_raw: string; byte_size: number };
+
+// Verify many stored files in parallel (our own Storage, not DRE).
+export async function verifyStored(receipts: StoredReceipt[], download: (p: string) => Promise<Uint8Array>,
+  sleep: (ms: number) => Promise<void>, concurrency = 10, retries = 3) {
+  const verifiedIds: number[] = [];
+  const failed: { id: number; reason: string }[] = [];
+  const queue = [...receipts];
+  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+    for (let r = queue.shift(); r; r = queue.shift()) {
+      const problem = await checkStored(r.storage_path, r.sha256_raw, r.byte_size, download, retries, sleep);
+      if (problem) failed.push({ id: r.id, reason: problem });
+      else verifiedIds.push(r.id);
     }
-    if (reason) { failed++; await withRetry(`mark failed ${r.id}`, () => deps.markFailed(r.id, reason!), retries, deps.sleep); }
-    else { verified++; await withRetry(`mark verified ${r.id}`, () => deps.markVerified(r.id), retries, deps.sleep); }
-  }
-  return { verified, failed };
+  }));
+  return { verifiedIds, failed };
 }
