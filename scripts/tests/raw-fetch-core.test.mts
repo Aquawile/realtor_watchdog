@@ -1,6 +1,7 @@
 // Tests for the DRE raw fetcher core against simulated DRE and Supabase
-// behavior. Time is scaled: 1 simulated second = 25 real ms (coarser scaling
-// lets timer jitter distort measured response times).
+// behavior, on a virtual clock: simulated time advances only when every task
+// is waiting on a timer, so a scripted 1,400 ms response always measures
+// exactly 1,400 ms regardless of machine load (no real waiting either).
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -9,9 +10,25 @@ import {
   type FetchDeps, type PageReceipt, type PageResponse, type Settings,
 } from "../lib/raw-fetch-core.mts";
 
-const SCALE = 40;
-const now = () => performance.now() * SCALE;
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms / SCALE));
+let virtualNow = 0;
+let timerSeq = 0;
+let driving = false;
+const timers: { at: number; seq: number; resolve: () => void }[] = [];
+// setImmediate runs only after all pending promise callbacks have drained,
+// i.e. when every task is blocked on a timer; then fire the earliest one.
+function step() {
+  const next = timers.shift();
+  if (!next) { driving = false; return; }
+  virtualNow = Math.max(virtualNow, next.at);
+  next.resolve();
+  setImmediate(step);
+}
+const now = () => virtualNow;
+const sleep = (ms: number) => new Promise<void>((resolve) => {
+  timers.push({ at: virtualNow + Math.max(0, ms), seq: timerSeq++, resolve });
+  timers.sort((a, b) => a.at - b.at || a.seq - b.seq);
+  if (!driving) { driving = true; setImmediate(step); }
+});
 const enc = (s: string) => new TextEncoder().encode(s);
 
 const OK_PAGE = (lic: string) => enc(`<html>License ID: ${lic}<br/>\r\n>>>> Public information request complete <<<<</html>`);
@@ -88,22 +105,69 @@ test("ramps up parallel requests while DRE's response time stays normal", async 
   assert.ok(r.maxUsed <= 8);
 });
 
-test("halves parallel requests when DRE slows down more than 30%", async () => {
-  const h = harness((_l, _a, i) => ({ latency: i < 40 ? 1000 : 1500 }));
-  const r = await runFetch(licenses(80), h.deps, S());
+test("normal variation (batch 6 pattern, 1.1-1.8 s) never triggers the guardrails", async () => {
+  const pattern = [1100, 1300, 1800, 1200, 1500, 1400, 1700, 1250, 1600, 1350];
+  const h = harness((_l, _a, i) => ({ latency: pattern[Math.abs(i) % pattern.length] }));
+  const r = await runFetch(licenses(150), h.deps, S());
   assert.equal(r.status, "completed");
-  const drops = h.logs.map((l) => l.match(/\((\d+\.\d+)x baseline\): concurrency (\d+) -> (\d+)/)).filter(Boolean)
-    .filter((m) => Number(m![1]) > 1.3 && Number(m![1]) <= 2 && Number(m![3]) < Number(m![2]));
-  assert.ok(drops.length > 0, h.logs.join("\n"));
+  assert.ok(!h.logs.some((l) => /SLOW/.test(l)), h.logs.join("\n"));
+  assert.equal(r.maxUsed, DEFAULTS.maxConcurrency);
 });
 
-test("pauses and then stops if DRE stays more than 2x slower", async () => {
+test("soft limit: a brief spike above 2,500 ms halves parallel requests, then it recovers", async () => {
+  const h = harness((_l, _a, i) => ({ latency: i >= 40 && i < 50 ? 3000 : 1000 }));
+  const r = await runFetch(licenses(150), h.deps, S());
+  assert.equal(r.status, "completed", h.logs.join("\n"));
+  const slow = h.logs.find((l) => /^SLOW: window median 3\d{3} ms/.test(l));
+  assert.ok(slow, h.logs.join("\n"));
+  const [, before, after] = slow!.match(/concurrency (\d+) -> (\d+)/)!;
+  assert.equal(Number(after), Math.floor(Number(before) / 2));
+});
+
+test("HARD STOP: self-terminates if still above the soft limit after backing off", async () => {
   const h = harness((_l, _a, i) => ({ latency: i < 20 ? 1000 : 3000 }));
-  const r = await runFetch(licenses(200), h.deps, S());
+  const r = await runFetch(licenses(300), h.deps, S());
   assert.equal(r.status, "stopped");
-  assert.match(r.stopReason!, /slower than baseline/);
-  assert.ok(h.logs.some((l) => /pausing 60s/.test(l)));
-  assert.ok(r.stats.attempted < 200);
+  assert.match(r.stopReason!, /^hard stop: DRE still slow after backing off/);
+  assert.equal(h.logs.filter((l) => /^SLOW/.test(l)).length, 1, "backed off exactly once before stopping");
+  assert.ok(r.stats.attempted < 100, `kept going: ${r.stats.attempted}`);
+});
+
+test("hard limit: above 4,000 ms drops to 1 request and pauses; hard stop if still over", async () => {
+  const h = harness((_l, _a, i) => ({ latency: i < 20 ? 1000 : 5000 }));
+  const t0 = now();
+  const r = await runFetch(licenses(300), h.deps, S());
+  assert.equal(r.status, "stopped");
+  assert.match(r.stopReason!, /^hard stop/);
+  const vs = h.logs.find((l) => /^VERY SLOW: window median 5\d{3} ms/.test(l));
+  assert.ok(vs && /concurrency \d+ -> 1, pausing 60s/.test(vs), h.logs.join("\n"));
+  assert.ok(now() - t0 > 60_000, "the 60 s pause actually happened");
+});
+
+test("a per-request hard timeout is enforced", async () => {
+  let seen = 0;
+  const h = harness(() => ({ latency: 1000 }));
+  const fetchPage = h.deps.fetchPage;
+  h.deps.fetchPage = (url, timeoutMs) => { seen = timeoutMs; return fetchPage(url, timeoutMs); };
+  await runFetch(licenses(3), h.deps, S());
+  assert.equal(seen, 15_000);
+});
+
+test("batch 7 pattern: a slow start doesn't blind the guardrail to a later slowdown", async () => {
+  // DRE at 5.6 s for the first 40 s (as seen in batch 7), then normal
+  // (~1.4 s), then a real slowdown to ~3 s. Old logic took 5.6 s as the
+  // baseline and would have ignored anything under ~7.3 s.
+  const t0 = now();
+  const h = harness(() => {
+    const t = now() - t0;
+    return { latency: t < 40_000 ? 5600 : t < 200_000 ? 1400 : 3000 };
+  });
+  const r = await runFetch(licenses(3000), h.deps, S());
+  assert.ok(h.logs.some((l) => /^VERY SLOW: window median 5\d{3} ms/.test(l)), "slow start detected");
+  assert.equal(r.status, "stopped", h.logs.join("\n"));
+  assert.match(r.stopReason!, /^hard stop: DRE still slow after backing off 1x: window median 3\d{3} ms/);
+  assert.ok(r.baseline! >= 1300 && r.baseline! <= 1600, `baseline ${r.baseline} reflects normal, not the slow start`);
+  assert.ok(r.stats.ok > 300, `fetched through the normal period: ${r.stats.ok}`);
 });
 
 test("stops immediately on a possible block (403/429/503) without retrying", async () => {
