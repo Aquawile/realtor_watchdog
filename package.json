@@ -11,7 +11,8 @@
     "ingest:dre": "node --env-file=.env.local scripts/ingest-dre.mts",
     "test": "node scripts/run-all-tests.mjs",
     "test:fetch": "node --test \"scripts/tests/*.test.mts\"",
-    "fetch:dre": "node --env-file=.env.local scripts/fetch-dre-pages.mts"
+    "fetch:dre": "node --env-file=.env.local scripts/fetch-dre-pages.mts",
+    "check:dre": "node --env-file=.env.local scripts/check-dre-raw.mts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
