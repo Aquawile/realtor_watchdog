@@ -267,5 +267,12 @@ ok('bad affiliation kind rejected (whole group rolls back)', !!(await db.query(`
   [parsedPayload('LICENSED', [{ ...aff(1, 'X'), kind: 'nonsense' }], [])]).then(() => false, () => true))
   && (await db.query(`select string_agg(related_name, ',') s from dre_affiliations`)).rows[0].s === 'Broker C');
 
+for (const st of ['revoked', 'surrendered', 'suspended']) {
+  ok(`ended_status '${st}' accepted`, !!(await db.query(`select dre_apply_parsed($1::jsonb)`,
+    [parsedPayload('LICENSED', [{ ...aff(1, 'Corp'), kind: 'officer_of_corporation', is_current: false, ended_status: st, ended_on: '2022-09-20' }], [])]).then(() => true, () => false)));
+}
+ok('unknown ended_status rejected', !!(await db.query(`select dre_apply_parsed($1::jsonb)`,
+  [parsedPayload('LICENSED', [{ ...aff(1, 'Corp'), kind: 'officer_of_corporation', ended_status: 'vanished' }], [])]).then(() => false, () => true)));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

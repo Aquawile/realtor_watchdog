@@ -7,7 +7,9 @@
 
 import { clean, readPage, type Entry } from "./dre-page-html.mts";
 
-export const PARSER_VERSION = 1;
+// v2 (2026-10-05): officer roles REVOKED/SURRENDERED/SUSPENDED recorded as
+// stated (were left "current"); more suite/unit address formats.
+export const PARSER_VERSION = 2;
 const DRE_BASE = "https://www2.dre.ca.gov";
 
 export type LicenseeRecord = {
@@ -43,7 +45,7 @@ export type Affiliation = {
   from_date: string | null;
   to_date: string | null;
   related_expiration_date: string | null;
-  ended_status: "expired" | "canceled" | null;   // officer roles
+  ended_status: "expired" | "canceled" | "revoked" | "surrendered" | "suspended" | null; // officer roles, as DRE states it
   ended_on: string | null;
   officer_restricted: boolean | null;
   corporation_restricted: boolean | null;
@@ -76,10 +78,12 @@ const END_MARKER = /Public information request complete/i;
 // Street / suite / city lines that follow a related licensee's name.
 const isAddress = (l: string) =>
   /^\d/.test(l) ||
-  /^(SUITE|STE|UNIT|BLDG|BUILDING|APT|FLOOR|FL|RM|ROOM|OFFICE|SPC|SPACE|#|PMB)(\s|\d|#|-|$)/i.test(l) || // "STE150", "OFFICE 1132"
-  /^[A-Z]{1,2}\s?\d{1,5}$/.test(l) || // unit designators like "H 628"
+  /^#/.test(l) || // "#D206", "#B"
+  /^(SUITE|SUTE|STE|UNIT|BLDG|BUILDING|APT|FLOOR|FL|RM|ROOM|OFFICE|SPC|SPACE|PMB)(\s|\d|#|-|:|$)/i.test(l) || // "STE150", "STE: 205-B"
+  /\b(SUITE|STE)\s*:?\s*[A-Z]?\d+\b/i.test(l) && /\b(TOWER|FLOOR|BLDG|BUILDING)\b/i.test(l) || // "WEST TOWER SUITE 3000"
+  /^[A-Z]{1,2}-?\s?\d{1,5}$/.test(l) || // unit designators: "H 628", "I-103"
   /^P\.?\s?O\.?\s?BOX\b/i.test(l) ||
-  /, [A-Z]{2}\s+\d{5}(-\d{4})?$/.test(l);
+  /,? [A-Z]{2}\s+\d{5}(-\d{4})?$/.test(l); // "IRVINE, CA 92618", "BUENA PARK CA 90621"
 
 export class NotARecordPage extends Error {}
 
@@ -156,8 +160,12 @@ export function parsePage(bytes: Uint8Array, expectedLicense: string): ParsedPag
         if ((m = l.match(/^(\d{8}) - (.+)$/))) { lic ??= m[1]; name = m[2]; used.add(i); return; }
         if ((m = l.match(/^From (\S+) to (\S+)$/i))) { from = toDate(m[1]); to = toDate(m[2]); nameDone = true; used.add(i); return; }
         if ((m = l.match(/^License Expiration Date:\s*(\S+)$/i))) { relExp = toDate(m[1]); nameDone = true; used.add(i); return; }
-        if ((m = l.match(/^OFFICER (LICENSE EXPIRED|CANCELED|LICENSE CANCELED) AS OF (\S+)$/i))) {
-          endedStatus = /CANCEL/i.test(m[1]) ? "canceled" : "expired"; endedOn = toDate(m[2]); nameDone = true; used.add(i); return;
+        // DRE's end-of-role wording, recorded as stated: "OFFICER LICENSE EXPIRED AS OF 07/03/94",
+        // "OFFICER CANCELED AS OF ...", "OFFICER LICENSE REVOKED AS OF ...".
+        if ((m = l.match(/^OFFICER (?:LICENSE )?(EXPIRED|CANCELED|CANCELLED|REVOKED|SURRENDERED|SUSPENDED) AS OF (\S+)$/i))) {
+          const word = m[1].toUpperCase();
+          endedStatus = word.startsWith("CANCEL") ? "canceled" : (word.toLowerCase() as Affiliation["ended_status"]);
+          endedOn = toDate(m[2]); nameDone = true; used.add(i); return;
         }
         if ((m = l.match(/^\*\*THIS OFFICER IS (NOT )?RESTRICTED\. THIS CORP IS (NOT )?RESTRICTED\.\*\*$/i))) {
           offR = !m[1]; corpR = !m[2]; nameDone = true; used.add(i); return;
