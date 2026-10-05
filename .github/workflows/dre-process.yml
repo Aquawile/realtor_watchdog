@@ -1,0 +1,44 @@
+name: DRE process
+
+# Processed layer: parses stored raw DRE pages (dre-raw bucket) into
+# dre_licensee_records / dre_affiliations / dre_actions. Reads only from the
+# raw layer, never contacts DRE. Runs automatically after each successful raw
+# fetch (see dre-raw-fetch.yml) and can be started by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      reprocess:
+        description: "Reprocess every page, even ones already processed with the current parser"
+        type: boolean
+        default: false
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dre-process
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/checks.yml
+
+  process:
+    needs: test # nothing is written unless every check and test passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies (3 attempts)
+        run: for i in 1 2 3; do npm ci && break; [ "$i" = 3 ] && exit 1; sleep 15; done
+      - name: Process raw pages
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          REPROCESS: ${{ inputs.reprocess }}
+        run: node scripts/process-dre-pages.mts ${{ inputs.reprocess && '--reprocess' || '' }}

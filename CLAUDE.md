@@ -79,6 +79,13 @@ The platform makes no editorial statements about any realtor or property. It sur
   - **Monitoring:** `node --env-file=.env.local scripts/watch-dre-batch.mts --run <github run id>` watches the GitHub run and the batch record together. It alerts on a silent heartbeat, DRE slowing down, errors, or a runner that died.
   - Batch 4 (first real batch, 200 pages, 2026-09-28): 200/200 ok and verified, DRE steady at ~1.09 s up to 8 parallel. Verification was the bottleneck at 0.86 s/file sequential, which is why it's now inline and parallel.
   - Processed-layer design so far: one-per-realtor facts become columns on `realtors`; repeating facts go into 2 tables (`realtor_affiliations`, `realtor_dre_actions`). Column names are finalized only after a field survey of all raw pages, reviewed by the owner.
+- **DRE raw layer: first full run (2026-09-28 → 10-05).** 44,354 of ~49,340 OC pages stored and verified, with 0 errors in any batch and 2 guardrail hard stops (batches 16 and 19). The owner chose to leave the final ~5,000 for later and approved the processed layer on 2026-10-05.
+- **DRE processed layer (approved 2026-10-05):** `scripts/process-dre-pages.mts` (parser: `scripts/lib/dre-page-parser.mts`, designed from a field survey of all 44,354 pages via `scripts/survey-dre-raw.mts`) writes three server-only tables keyed by license number. They join to `realtors` once the bulk file is loaded.
+  - `dre_licensee_records`: one row per licensee: status verbatim, restricted/NBA flags, dates, NMLS IDs, former names, and `unparsed_lines` (anything not placed, kept verbatim).
+  - `dre_affiliations`: brokers current and past with dates, broker-associate roles, officer roles (expired/canceled), branch-manager roles, supervised salespersons and broker associates, DBAs.
+  - `dre_actions`: discipline comments verbatim with dates, plus DRE hearing-document links (linked, never hosted).
+  - Addresses are dropped. Every row records `source_fetch_id` and `parser_version`, so the layer can be rebuilt from raw. Rows for a licensee are replaced atomically (`dre_apply_parsed`).
+  - **Auto-routing:** `.github/workflows/dre-raw-fetch.yml` runs `.github/workflows/dre-process.yml` after every successful fetch batch. It can also be run by hand, with `reprocess` to rebuild everything.
 - **Testing:** `npm test` runs every suite and fails on any failed, skipped, todo or missing test. `.github/workflows/checks.yml` runs lint, type-check, tests and build on every push, and data workflows run it first.
 - **Schema lives in `supabase/migrations/`.** Behavioral tests: `npm run test:db` (PGlite, no Docker).
 
