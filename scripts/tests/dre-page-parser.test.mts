@@ -118,6 +118,20 @@ test("expiration notes, status variants, former names", () => {
   assert.deepEqual(p.record.former_names, ["Smith, Jane", "Jones, Jane Q"]);
 });
 
+test("revoked officer roles are recorded as revoked, not current; unusual address formats are dropped", () => {
+  const p = parsePage(page([
+    ...base("01027050", "BROKER"),
+    ["Affiliated Licensed Corporation(s)", `<A HREF = "/publicasp/pplinfo.asp?License_id=01111111">01111111</A> - Officer Expiration Date: 09/19/22<br/>Revoked Realty Inc<br/>OFFICER LICENSE REVOKED AS OF 09/20/22`],
+    ["Responsible Broker", `License ID: <a href="pplinfo.asp?License_id=00616212">00616212</a><br/>Big Brokerage Inc<br/>2100 MAIN ST<br/>WEST TOWER SUITE 3000<br/>I-103<br/>#D206<br/>STE: 205-B<br/>BUENA PARK CA 90621`],
+  ]), "01027050");
+  const officer = p.affiliations.find((a) => a.kind === "officer_of_corporation")!;
+  assert.equal(officer.ended_status, "revoked");
+  assert.equal(officer.ended_on, "2022-09-20");
+  assert.equal(officer.is_current, false);
+  assert.equal(p.affiliations.find((a) => a.kind === "responsible_broker")!.related_name, "Big Brokerage Inc");
+  assert.deepEqual(p.record.unparsed_lines, []);
+});
+
 test("two-digit years: past issue dates are 1900s, near-future expirations are 2000s", () => {
   assert.equal(toDate("10/30/66"), "1966-10-30");
   assert.equal(toDate("04/12/85"), "1985-04-12");
