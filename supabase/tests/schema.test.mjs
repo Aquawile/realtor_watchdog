@@ -246,7 +246,7 @@ const parsedPayload = (status, affiliations, actions) => JSON.stringify([{
     page_encoding: 'utf-8', license_type: 'BROKER', name_as_listed: 'Doe, Jane', license_status_raw: status,
     is_restricted: status.includes('RESTRICTED'), is_non_working: false, expiration_date: '2028-05-30', expiration_note: null,
     salesperson_license_issued: null, broker_license_issued: '1981-01-07', issued_dates_unofficial: true,
-    mlo_nmls_id: null, company_mlo_nmls_id: null, former_names: ['Roe, Jane'], unparsed_lines: [] },
+    mlo_nmls_id: null, company_mlo_nmls_id: null, former_names: ['Roe, Jane'], salespersons_count_reported: 138, broker_associates_count_reported: null, unparsed_lines: [] },
   affiliations, actions }]);
 const aff = (seq, name) => ({ seq, kind: 'responsible_broker', is_current: seq === 1, related_license_number: '00616212', related_name: name,
   from_date: null, to_date: null, related_expiration_date: null, ended_status: null, ended_on: null,
@@ -254,6 +254,7 @@ const aff = (seq, name) => ({ seq, kind: 'responsible_broker', is_current: seq =
 await db.query(`select dre_apply_parsed($1::jsonb)`, [parsedPayload('LICENSED *** RESTRICTED ***',
   [aff(1, 'Broker A'), aff(2, 'Broker B')], [{ seq: 1, kind: 'comment', action_date: '1986-07-03', text_verbatim: 'REVOKE WITH R TO RL ON T&C', document_url: null }])]);
 const rec = (await db.query(`select *, dre_records_as_of at time zone 'UTC' as utc from dre_licensee_records`)).rows[0];
+ok('reported salesperson count stored', rec.salespersons_count_reported === 138);
 ok('processed record written', rec.is_restricted === true && rec.former_names[0] === 'Roe, Jane' && rec.broker_license_issued !== null);
 ok('DRE Pacific timestamp stored correctly (1:40:26 PM PDT = 20:40:26 UTC)', String(rec.utc).includes('20:40:26'));
 ok('affiliations and actions written', (await db.query(`select count(*)::int n from dre_affiliations`)).rows[0].n === 2
