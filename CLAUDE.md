@@ -84,6 +84,9 @@ The platform makes no editorial statements about any realtor or property. It sur
   - `dre_licensee_records`: one row per licensee: status verbatim, restricted/NBA flags, dates, NMLS IDs, former names, and `unparsed_lines` (anything not placed, kept verbatim).
   - `dre_affiliations`: brokers current and past with dates, broker-associate roles, officer roles (expired/canceled), branch-manager roles, supervised salespersons and broker associates, DBAs.
   - `dre_actions`: discipline comments verbatim with dates, plus DRE hearing-document links (linked, never hosted).
+  - Officer roles record DRE's end wording as stated: `expired`, `canceled`, `revoked`, `surrendered` or `suspended` (55 revoked roles were misread as current in parser v1). DRE's "There are currently N Salespersons…" for large brokers is stored as `salespersons_count_reported`.
+  - **Quality rule:** status or note wording is never absorbed into a name; anything unrecognized stays in `unparsed_lines`. Every processing run reports a "suspicious names" count (it should be 0) next to the unplaced-lines count.
+  - State after the first run (parser v3, 2026-10-05): 44,354 records, 82,775 affiliations, 5,191 actions; 3 pages with unplaced address fragments; database 126 MB.
   - Addresses are dropped. Every row records `source_fetch_id` and `parser_version`, so the layer can be rebuilt from raw. Rows for a licensee are replaced atomically (`dre_apply_parsed`).
   - **Auto-routing:** `.github/workflows/dre-raw-fetch.yml` runs `.github/workflows/dre-process.yml` after every successful fetch batch. It can also be run by hand, with `reprocess` to rebuild everything.
 - **Testing:** `npm test` runs every suite and fails on any failed, skipped, todo or missing test. `.github/workflows/checks.yml` runs lint, type-check, tests and build on every push, and data workflows run it first.
