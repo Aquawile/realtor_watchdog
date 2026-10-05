@@ -80,3 +80,10 @@ jobs:
         run: |
           echo "### Run did not complete normally" >> "$GITHUB_STEP_SUMMARY"
           echo "Exit code 2 = stopped by a guardrail (see reason above); 1 = crash or verification failure. Nothing is lost: unfinished or failed pages are fetched again by the next batch." >> "$GITHUB_STEP_SUMMARY"
+
+  # Auto-route: after a successful fetch batch, process the new raw pages.
+  process:
+    needs: fetch
+    if: ${{ success() && inputs.mode == 'fetch' }}
+    uses: ./.github/workflows/dre-process.yml
+    secrets: inherit

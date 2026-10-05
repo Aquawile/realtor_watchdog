@@ -233,5 +233,39 @@ ok('network error has no stored file', !!(await db.query(
 ok('bad license number rejected', !!(await db.query(
   `insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome) values ($1, '123', 'u', 'network_error')`, [batch]).then(() => false, () => true)));
 
+// Processed DRE layer.
+for (const t of ['dre_licensee_records', 'dre_affiliations', 'dre_actions', 'dre_process_runs']) {
+  ok(`anon cannot read ${t}`, !!(await fails(null, `select * from ${t}`)));
+  ok(`users cannot read ${t}`, !!(await fails(users.alice, `select * from ${t}`)));
+}
+ok('users cannot call dre_apply_parsed', !!(await fails(users.alice, `select dre_apply_parsed('[]'::jsonb)`)));
+const fetchId = (await db.query(`insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome, storage_path, sha256_raw)
+  values ($1, '00323437', 'u', 'ok', 'pages/00323437/x.html.gz', repeat('a', 64)) returning id`, [batch])).rows[0].id;
+const parsedPayload = (status, affiliations, actions) => JSON.stringify([{
+  record: { license_number: '00323437', source_fetch_id: fetchId, parser_version: 1, dre_records_as_of: '9/27/2026 1:40:26 PM',
+    page_encoding: 'utf-8', license_type: 'BROKER', name_as_listed: 'Doe, Jane', license_status_raw: status,
+    is_restricted: status.includes('RESTRICTED'), is_non_working: false, expiration_date: '2028-05-30', expiration_note: null,
+    salesperson_license_issued: null, broker_license_issued: '1981-01-07', issued_dates_unofficial: true,
+    mlo_nmls_id: null, company_mlo_nmls_id: null, former_names: ['Roe, Jane'], unparsed_lines: [] },
+  affiliations, actions }]);
+const aff = (seq, name) => ({ seq, kind: 'responsible_broker', is_current: seq === 1, related_license_number: '00616212', related_name: name,
+  from_date: null, to_date: null, related_expiration_date: null, ended_status: null, ended_on: null,
+  officer_restricted: null, corporation_restricted: null, raw_text: name });
+await db.query(`select dre_apply_parsed($1::jsonb)`, [parsedPayload('LICENSED *** RESTRICTED ***',
+  [aff(1, 'Broker A'), aff(2, 'Broker B')], [{ seq: 1, kind: 'comment', action_date: '1986-07-03', text_verbatim: 'REVOKE WITH R TO RL ON T&C', document_url: null }])]);
+const rec = (await db.query(`select *, dre_records_as_of at time zone 'UTC' as utc from dre_licensee_records`)).rows[0];
+ok('processed record written', rec.is_restricted === true && rec.former_names[0] === 'Roe, Jane' && rec.broker_license_issued !== null);
+ok('DRE Pacific timestamp stored correctly (1:40:26 PM PDT = 20:40:26 UTC)', String(rec.utc).includes('20:40:26'));
+ok('affiliations and actions written', (await db.query(`select count(*)::int n from dre_affiliations`)).rows[0].n === 2
+  && (await db.query(`select count(*)::int n from dre_actions`)).rows[0].n === 1);
+await db.query(`select dre_apply_parsed($1::jsonb)`, [parsedPayload('LICENSED', [aff(1, 'Broker C')], [])]);
+ok('reprocessing replaces rows, never duplicates', (await db.query(`select count(*)::int n from dre_licensee_records`)).rows[0].n === 1
+  && (await db.query(`select string_agg(related_name, ',') s from dre_affiliations`)).rows[0].s === 'Broker C'
+  && (await db.query(`select count(*)::int n from dre_actions`)).rows[0].n === 0
+  && (await db.query(`select is_restricted from dre_licensee_records`)).rows[0].is_restricted === false);
+ok('bad affiliation kind rejected (whole group rolls back)', !!(await db.query(`select dre_apply_parsed($1::jsonb)`,
+  [parsedPayload('LICENSED', [{ ...aff(1, 'X'), kind: 'nonsense' }], [])]).then(() => false, () => true))
+  && (await db.query(`select string_agg(related_name, ',') s from dre_affiliations`)).rows[0].s === 'Broker C');
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

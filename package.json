@@ -11,10 +11,12 @@
     "ingest:dre": "node --env-file=.env.local scripts/ingest-dre.mts",
     "test": "node scripts/run-all-tests.mjs",
     "test:fetch": "node --test \"scripts/tests/*.test.mts\"",
-    "fetch:dre": "node --env-file=.env.local scripts/fetch-dre-pages.mts"
+    "fetch:dre": "node --env-file=.env.local scripts/fetch-dre-pages.mts",
+    "check:dre": "node --env-file=.env.local scripts/check-dre-raw.mts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
+    "cheerio": "^1.2.0",
     "next": "16.3.6",
     "react": "19.2.8",
     "react-dom": "19.2.8"
