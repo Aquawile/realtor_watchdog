@@ -9,7 +9,10 @@ import { clean, readPage, type Entry } from "./dre-page-html.mts";
 
 // v2 (2026-10-05): officer roles REVOKED/SURRENDERED/SUSPENDED recorded as
 // stated (were left "current"); more suite/unit address formats.
-export const PARSER_VERSION = 2;
+// v3 (2026-10-05): status lines without the OFFICER prefix; DRE's "There are
+// currently N Salespersons" stored as a count; status/note wording is never
+// absorbed into a name (stays unplaced instead).
+export const PARSER_VERSION = 3;
 const DRE_BASE = "https://www2.dre.ca.gov";
 
 export type LicenseeRecord = {
@@ -29,6 +32,8 @@ export type LicenseeRecord = {
   mlo_nmls_id: string | null;
   company_mlo_nmls_id: string | null;
   former_names: string[];
+  salespersons_count_reported: number | null;      // DRE's "There are currently N Salespersons ..." (not listed)
+  broker_associates_count_reported: number | null;
   unparsed_lines: { label: string; line: string }[];
 };
 
@@ -85,6 +90,18 @@ const isAddress = (l: string) =>
   /^P\.?\s?O\.?\s?BOX\b/i.test(l) ||
   /,? [A-Z]{2}\s+\d{5}(-\d{4})?$/.test(l); // "IRVINE, CA 92618", "BUENA PARK CA 90621"
 
+// Status / note wording that must never be absorbed into a name. If the parser
+// doesn't recognize such a line it stays unplaced, where quality checks see it.
+const looksLikeNote = (l: string) =>
+  /\bAS OF \d{1,2}\/\d{1,2}\/\d{2,4}/i.test(l) || /\*\*/.test(l) || /Expiration Date/i.test(l) ||
+  /^There are currently \d+/i.test(l) || /RETRIEVE .* LIST/i.test(l);
+
+// Quality check used by the processing job: a related name that contains
+// status / date / address wording means something was misread.
+export const suspiciousName = (name: string | null) =>
+  !!name && (/\bAS OF\b/i.test(name) || /\*\*/.test(name) || /Expiration Date/i.test(name) || /License ID/i.test(name) ||
+    /\d{1,2}\/\d{1,2}\/\d{2,4}/.test(name) || /There are currently/i.test(name) || /, [A-Z]{2}\s+\d{5}/.test(name));
+
 export class NotARecordPage extends Error {}
 
 export function parsePage(bytes: Uint8Array, expectedLicense: string): ParsedPage {
@@ -131,6 +148,8 @@ export function parsePage(bytes: Uint8Array, expectedLicense: string): ParsedPag
     mlo_nmls_id: mlo.join(" ").match(/NMLS ID:\s*(\d+)/)?.[1] ?? null,
     company_mlo_nmls_id: companyMlo.join(" ").match(/^(\d+)/)?.[1] ?? null,
     former_names: take("Former Name(s)").flatMap((e) => e.lines).filter((l) => !NONE.test(l)),
+    salespersons_count_reported: null,
+    broker_associates_count_reported: null,
     unparsed_lines: unparsed,
   };
   for (const l of mlo) if (!/NMLS ID:\s*\d+/.test(l) && !/check the status/i.test(l)) unparsed.push({ label: "MLO License Endorsement", line: l });
@@ -143,6 +162,14 @@ export function parsePage(bytes: Uint8Array, expectedLicense: string): ParsedPag
   // then name lines (wrapped names continue), then From/To, status notes, addresses.
   const affil = (label: string, kind: AffiliationKind, current: boolean) => {
     for (const e of take(label)) {
+      // Large brokers: DRE gives a count and a link instead of listing everyone.
+      const count = e.lines[0].match(/^There are currently (\d+) (Salespersons|Broker Associates)\b/i);
+      if (count) {
+        if (/^Salesperson/i.test(count[2])) record.salespersons_count_reported = Number(count[1]);
+        else record.broker_associates_count_reported = Number(count[1]);
+        e.lines.slice(1).forEach((line) => { if (!/^RETRIEVE .* LIST$/i.test(line)) unparsed.push({ label, line }); });
+        continue;
+      }
       if (NONE.test(e.lines[0]) || END_MARKER.test(e.lines[0])) {
         e.lines.slice(1).forEach((line) => { if (!END_MARKER.test(line) && !NONE.test(line)) unparsed.push({ label, line }); });
         continue;
@@ -162,7 +189,7 @@ export function parsePage(bytes: Uint8Array, expectedLicense: string): ParsedPag
         if ((m = l.match(/^License Expiration Date:\s*(\S+)$/i))) { relExp = toDate(m[1]); nameDone = true; used.add(i); return; }
         // DRE's end-of-role wording, recorded as stated: "OFFICER LICENSE EXPIRED AS OF 07/03/94",
         // "OFFICER CANCELED AS OF ...", "OFFICER LICENSE REVOKED AS OF ...".
-        if ((m = l.match(/^OFFICER (?:LICENSE )?(EXPIRED|CANCELED|CANCELLED|REVOKED|SURRENDERED|SUSPENDED) AS OF (\S+)$/i))) {
+        if ((m = l.match(/^(?:OFFICER )?(?:LICENSE )?(EXPIRED|CANCELED|CANCELLED|REVOKED|SURRENDERED|SUSPENDED) AS OF (\S+)$/i))) {
           const word = m[1].toUpperCase();
           endedStatus = word.startsWith("CANCEL") ? "canceled" : (word.toLowerCase() as Affiliation["ended_status"]);
           endedOn = toDate(m[2]); nameDone = true; used.add(i); return;
@@ -170,6 +197,7 @@ export function parsePage(bytes: Uint8Array, expectedLicense: string): ParsedPag
         if ((m = l.match(/^\*\*THIS OFFICER IS (NOT )?RESTRICTED\. THIS CORP IS (NOT )?RESTRICTED\.\*\*$/i))) {
           offR = !m[1]; corpR = !m[2]; nameDone = true; used.add(i); return;
         }
+        if (looksLikeNote(l)) { nameDone = true; return; } // never glue a status/note onto a name; left unplaced (visible)
         if (!nameDone && (name === null || !isAddress(l))) {
           // First line after the license number is always the name (even "999 Investments, Inc").
           name = name === null ? l : `${name} ${l}`; used.add(i); return;

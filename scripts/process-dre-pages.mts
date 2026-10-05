@@ -13,7 +13,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { appendFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
-import { PARSER_VERSION, parsePage } from "./lib/dre-page-parser.mts";
+import { PARSER_VERSION, parsePage, suspiciousName } from "./lib/dre-page-parser.mts";
 
 const APPLY_BATCH = 100;
 const DOWNLOAD_CONCURRENCY = 12;
@@ -40,7 +40,8 @@ async function retry<T>(what: string, fn: () => PromiseLike<{ data: T; error: un
 const runner = process.env.GITHUB_RUN_ID ? `github-actions run ${process.env.GITHUB_RUN_ID}` : "local";
 const run = await retry("create run", () => db.from("dre_process_runs").insert({ runner, parser_version: PARSER_VERSION }).select("id").single());
 const runId = (run as { id: number }).id;
-const stats = { considered: 0, processed: 0, skipped: 0, failed: 0, withUnparsed: 0, affiliations: 0, actions: 0 };
+const stats = { considered: 0, processed: 0, skipped: 0, failed: 0, withUnparsed: 0, affiliations: 0, actions: 0, suspiciousNames: 0 };
+const suspicious: string[] = [];
 const failures: string[] = [];
 let status: "completed" | "failed" = "completed";
 let errorText: string | null = null;
@@ -93,6 +94,9 @@ try {
         if (parsed.record.unparsed_lines.length) stats.withUnparsed++;
         stats.affiliations += parsed.affiliations.length;
         stats.actions += parsed.actions.length;
+        for (const a of parsed.affiliations) {
+          if (suspiciousName(a.related_name)) { stats.suspiciousNames++; if (suspicious.length < 20) suspicious.push(`${license} [${a.kind}] ${a.related_name}`); }
+        }
         if (pending.length >= APPLY_BATCH) await flush();
       } catch (e) {
         stats.failed++;
@@ -125,9 +129,10 @@ try {
 const summary = [
   `### DRE processing run ${runId}: ${status.toUpperCase()} (parser v${PARSER_VERSION})`,
   errorText ? `**Error:** ${errorText}` : "",
-  `| raw licenses | processed | already up to date | failed | with unplaced lines | affiliation rows | action rows |`,
-  `|---|---|---|---|---|---|---|`,
-  `| ${stats.considered} | ${stats.processed} | ${stats.skipped} | ${stats.failed} | ${stats.withUnparsed} | ${stats.affiliations} | ${stats.actions} |`,
+  `| raw licenses | processed | already up to date | failed | with unplaced lines | suspicious names | affiliation rows | action rows |`,
+  `|---|---|---|---|---|---|---|---|`,
+  `| ${stats.considered} | ${stats.processed} | ${stats.skipped} | ${stats.failed} | ${stats.withUnparsed} | ${stats.suspiciousNames} | ${stats.affiliations} | ${stats.actions} |`,
+  suspicious.length ? `Suspicious names (status/date/address wording inside a name):\n${suspicious.map((x) => `- ${x}`).join("\n")}` : "",
 ].filter(Boolean).join("\n");
 console.log("\n" + summary);
 if (failures.length) console.log("failures:\n  " + failures.slice(0, 20).join("\n  "));

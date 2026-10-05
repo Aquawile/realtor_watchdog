@@ -132,6 +132,20 @@ test("revoked officer roles are recorded as revoked, not current; unusual addres
   assert.deepEqual(p.record.unparsed_lines, []);
 });
 
+test("v3: status without OFFICER prefix, DRE's salesperson count, notes never glued onto names", () => {
+  const p = parsePage(page([
+    ...base("01713303", "BROKER"),
+    ["Affiliated Licensed Corporation(s)", `<A HREF = "/publicasp/pplinfo.asp?License_id=01222222">01222222</A> - Officer Expiration Date: 08/24/11<br/>Jamberton Inc<br/>SUSPENDED AS OF 08/25/11<br/><br/><A HREF = "/publicasp/pplinfo.asp?License_id=01333333">01333333</A> - Officer Expiration Date: 01/01/30<br/>Odd Corp<br/>FROZEN AS OF 02/02/22`],
+    ["Salespersons", "There are currently 138 Salespersons affiliated with this Broker/Corporation.<br/>RETRIEVE SALESPERSON LIST"],
+  ]), "01713303");
+  const [jam, odd] = p.affiliations.filter((a) => a.kind === "officer_of_corporation");
+  assert.deepEqual([jam.related_name, jam.ended_status, jam.ended_on, jam.is_current], ["Jamberton Inc", "suspended", "2011-08-25", false]);
+  assert.equal(odd.related_name, "Odd Corp", "unknown status wording isn't glued onto the name");
+  assert.deepEqual(p.record.unparsed_lines, [{ label: "Affiliated Licensed Corporation(s)", line: "FROZEN AS OF 02/02/22" }]);
+  assert.equal(p.record.salespersons_count_reported, 138);
+  assert.equal(p.affiliations.filter((a) => a.kind === "supervised_salesperson").length, 0);
+});
+
 test("two-digit years: past issue dates are 1900s, near-future expirations are 2000s", () => {
   assert.equal(toDate("10/30/66"), "1966-10-30");
   assert.equal(toDate("04/12/85"), "1985-04-12");
