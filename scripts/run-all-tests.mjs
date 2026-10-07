@@ -32,13 +32,13 @@ else {
 for (const line of schema.split("\n")) if (/^\s+FAIL/.test(line)) console.log(line);
 
 // 3. Fetcher tests (node:test).
-const fetch = run("script tests (fetcher + parser)", ["--test", "--test-reporter=tap", "scripts/tests/*.test.mts"]);
+const fetch = run("script tests (fetcher, parser, bulk)", ["--test", "--test-reporter=tap", "scripts/tests/*.test.mts"]);
 const count = (k) => Number(fetch.match(new RegExp(`^# ${k} (\\d+)`, "m"))?.[1] ?? NaN);
 const t = { tests: count("tests"), pass: count("pass"), fail: count("fail"), skipped: count("skipped"), todo: count("todo"), cancelled: count("cancelled") };
-console.log("script tests (fetcher + parser):", JSON.stringify(t));
-if (!(t.tests > 0)) problems.push("script tests (fetcher + parser): 0 tests ran");
-if (t.pass !== t.tests) problems.push(`script tests (fetcher + parser): ${t.tests - t.pass} did not pass`);
-for (const k of ["fail", "skipped", "todo", "cancelled"]) if (t[k] !== 0) problems.push(`script tests (fetcher + parser): ${t[k]} ${k}`);
+console.log("script tests (fetcher, parser, bulk):", JSON.stringify(t));
+if (!(t.tests > 0)) problems.push("script tests (fetcher, parser, bulk): 0 tests ran");
+if (t.pass !== t.tests) problems.push(`script tests (fetcher, parser, bulk): ${t.tests - t.pass} did not pass`);
+for (const k of ["fail", "skipped", "todo", "cancelled"]) if (t[k] !== 0) problems.push(`script tests (fetcher, parser, bulk): ${t[k]} ${k}`);
 for (const line of fetch.split("\n")) if (/^not ok/.test(line)) console.log(line);
 
 if (problems.length) {
