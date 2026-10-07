@@ -41,6 +41,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { appendFileSync } from "node:fs";
 import { downloadBulkZip, isOcIndividual, parseBulkZip, storeBulkRaw } from "./lib/dre-bulk.mts";
+import { bundleReceipts, RAW_RECEIPT_COLUMNS, type RawReceipt } from "./lib/raw-pages.mts";
 import {
   DEFAULTS, classify, median, p90, runFetch, sha256, verifyStored, withRetry,
   type FetchResult, type PageReceipt, type StoredReceipt,
@@ -259,7 +260,10 @@ async function main() {
         fetchPage,
         storePage: async (path, gz) => { await q("upload page", db.storage.from(BUCKET).upload(path, gz, { contentType: "application/gzip" })); },
         downloadStored,
-        logPage: async (r: PageReceipt) => { await w("log page", db.from("raw_dre_page_fetches").insert({ batch_id: batchId, ...r })); },
+        // Request URL (rebuildable from the license) and HTTP headers are not kept in the database.
+        logPage: async ({ requested_url: _url, response_headers: _headers, ...r }: PageReceipt) => { // eslint-disable-line @typescript-eslint/no-unused-vars
+          await w("log page", db.from("raw_dre_page_fetches").insert({ batch_id: batchId, ...r }));
+        },
         progress: async (p) => { await w("progress", db.from("raw_dre_fetch_batches").update({
           attempted: p.attempted, ok_count: p.ok, not_found_count: p.not_found, incomplete_count: p.incomplete, error_count: p.errors,
           verify_failed_count: p.verify_failed, window_median_ms: p.window_median_ms, window_ratio: p.window_ratio,
@@ -286,6 +290,19 @@ async function main() {
       const storedCount = st.ok + st.not_found + st.incomplete;
       lines.push(`- Verification: ${storedCount} stored files byte-identical to what DRE sent, ${st.verify_failed} failed (re-fetched next batch)`);
       if (st.verify_failed && status === "completed") { status = "failed"; stopReason = `${st.verify_failed} stored files failed verification (queued for re-fetch)`; }
+
+      // 6. Bundle this batch's verified pages (1,000 per .tar); single files are
+      //    removed only after each bundle is re-verified (lib/raw-pages.mts).
+      const toBundle: RawReceipt[] = [];
+      for (let from = 0; ; from += 1000) {
+        const page = await q("load batch receipts", db.from("raw_dre_page_fetches").select(RAW_RECEIPT_COLUMNS)
+          .eq("batch_id", batchId).not("storage_path", "is", null).not("verified_at", "is", null).order("license_number").range(from, from + 999));
+        toBundle.push(...(page as unknown as RawReceipt[]));
+        if ((page as unknown[]).length < 1000) break;
+      }
+      let bundled = 0;
+      for (let i = 0; i < toBundle.length; i += 1000) bundled += (await bundleReceipts(db, toBundle.slice(i, i + 1000))).entries;
+      lines.push(`- Bundled ${bundled} verified pages into ${Math.ceil(toBundle.length / 1000)} bundle(s)`);
       if (st.incomplete) lines.push(`- ${st.incomplete} incomplete pages were stored for inspection and will be re-fetched`);
     }
   } catch (e) {

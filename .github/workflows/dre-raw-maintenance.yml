@@ -1,0 +1,43 @@
+name: DRE raw maintenance
+
+# One-off raw-layer maintenance (scripts/maintain-dre-raw.mts). Manual only.
+#   bundle           pack single-file raw pages into verified .tar bundles, then delete the single files
+#   archive-headers  move fetch headers + request URLs out of the database into one verified archive file
+#   purge-bulk       keep the latest 6 raw bulk files, purge older ones
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Maintenance task"
+        type: choice
+        options: [bundle, archive-headers, purge-bulk]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dre-raw-maintenance
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/checks.yml
+
+  maintain:
+    needs: test # nothing is changed unless every check and test passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies (3 attempts)
+        run: for i in 1 2 3; do npm ci && break; [ "$i" = 3 ] && exit 1; sleep 15; done
+      - name: Run maintenance task
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          TASK: ${{ inputs.task }}
+        run: node scripts/maintain-dre-raw.mts "--$TASK"
