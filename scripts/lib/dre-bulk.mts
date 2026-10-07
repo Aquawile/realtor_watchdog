@@ -1,7 +1,9 @@
 // Shared DRE bulk-file (CurrList.zip) download and parsing.
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse/sync";
 import { unzipSync } from "fflate";
+import { createHash } from "node:crypto";
 
 export const BULK_SOURCE_URL = "https://secure.dre.ca.gov/datafile/CurrList.zip";
 export const SCOPE_COUNTY = "ORANGE";
@@ -34,6 +36,24 @@ export function parseBulkZip(zip: Uint8Array): DreRow[] {
     throw new Error(`DRE file columns changed:\n  got      ${header.join()}\n  expected ${EXPECTED_COLUMNS.join()}`);
   }
   return parse(text, { columns: true, skip_empty_lines: true }) as DreRow[];
+}
+
+// Raw layer for the bulk file: store the exact downloaded bytes in the private
+// 'dre-raw' bucket and log them in raw_dre_bulk_files, unless an identical
+// copy (same SHA-256) is already stored. Returns the raw_dre_bulk_files id.
+export async function storeBulkRaw(db: SupabaseClient, bulk: { bytes: Uint8Array; status: number }): Promise<number> {
+  const sha = createHash("sha256").update(bulk.bytes).digest("hex");
+  const same = await db.from("raw_dre_bulk_files").select("id").eq("sha256_raw", sha).limit(1);
+  if (same.error) throw new Error(`find bulk file: ${JSON.stringify(same.error)}`);
+  if (same.data.length) return same.data[0].id as number;
+  const path = `bulk/${new Date().toISOString()}/CurrList.zip`;
+  const up = await db.storage.from("dre-raw").upload(path, bulk.bytes, { contentType: "application/zip" });
+  if (up.error) throw new Error(`upload bulk file: ${up.error.message}`);
+  const row = await db.from("raw_dre_bulk_files").insert({
+    source_url: BULK_SOURCE_URL, http_status: bulk.status, byte_size: bulk.bytes.length, sha256_raw: sha, storage_path: path,
+  }).select("id").single();
+  if (row.error) throw new Error(`log bulk file: ${JSON.stringify(row.error)}`);
+  return row.data.id as number;
 }
 
 // Orange County individuals (the realtors we profile).

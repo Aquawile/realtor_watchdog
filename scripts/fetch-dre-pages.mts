@@ -40,7 +40,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { appendFileSync } from "node:fs";
-import { BULK_SOURCE_URL, downloadBulkZip, isOcIndividual, parseBulkZip } from "./lib/dre-bulk.mts";
+import { downloadBulkZip, isOcIndividual, parseBulkZip, storeBulkRaw } from "./lib/dre-bulk.mts";
 import {
   DEFAULTS, classify, median, p90, runFetch, sha256, verifyStored, withRetry,
   type FetchResult, type PageReceipt, type StoredReceipt,
@@ -230,17 +230,7 @@ async function main() {
 
       // 3. Bulk file.
       const bulk = await downloadBulkZip();
-      const bulkSha = sha256(bulk.bytes);
-      const same = await q("find bulk", db.from("raw_dre_bulk_files").select("id").eq("sha256_raw", bulkSha).limit(1));
-      let bulkId: number;
-      if (same.length) bulkId = same[0].id;
-      else {
-        const path = `bulk/${new Date().toISOString()}/CurrList.zip`;
-        await q("upload bulk", db.storage.from(BUCKET).upload(path, bulk.bytes, { contentType: "application/zip" }));
-        bulkId = (await q<{ id: number }>("log bulk", db.from("raw_dre_bulk_files").insert({
-          source_url: BULK_SOURCE_URL, http_status: bulk.status, byte_size: bulk.bytes.length, sha256_raw: bulkSha, storage_path: path,
-        }).select("id").single())).id;
-      }
+      const bulkId = await storeBulkRaw(db, bulk);
       const licenses = [...new Set(parseBulkZip(bulk.bytes).filter(isOcIndividual).map((r) => r.lic_number.trim()))].sort();
       if (licenses.length < MIN_EXPECTED_OC_LICENSES) throw new Error(`bulk file has only ${licenses.length} OC individuals`);
 

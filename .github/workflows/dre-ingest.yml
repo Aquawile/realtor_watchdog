@@ -1,14 +1,16 @@
 name: DRE ingestion
 
-# Refresh of Orange County realtors from the CA DRE licensee bulk file.
-# Schedule intentionally disabled: the owner has not approved the first write
-# to `realtors`, and the cadence is being redesigned (weekly fingerprint check).
-# Manual runs only until then.
+# Weekly refresh of Orange County realtors (`realtors`) from the CA DRE
+# licensee bulk file: raw copy stored first, then a fingerprint check writes
+# only new/changed realtors and flags those no longer in scope.
+# (Approved 2026-10-07: first load + weekly fingerprint refresh.)
 on:
+  schedule:
+    - cron: "0 11 * * 1" # Mondays 11:00 UTC (4 AM PDT / 3 AM PST), after DRE's overnight update
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (read-only, print counts)"
+        description: "Dry run (stores the raw bulk file, prints counts, writes nothing to realtors)"
         type: boolean
         default: true
 
@@ -24,9 +26,9 @@ jobs:
     uses: ./.github/workflows/checks.yml
 
   ingest:
-    needs: test
+    needs: test # nothing is written unless every check and test passed
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -39,4 +41,5 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        # Scheduled runs have no inputs, so they write; manual runs default to dry run.
         run: node scripts/ingest-dre.mts ${{ inputs.dry_run && '--dry-run' || '' }}
