@@ -8,20 +8,20 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { writeFileSync } from "node:fs";
-import { gunzipSync } from "node:zlib";
 import { readPage } from "./lib/dre-page-html.mts";
+import { loadRawPages, RAW_RECEIPT_COLUMNS, type RawReceipt } from "./lib/raw-pages.mts";
 
 const db = createClient(process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SECRET_KEY!,
   { auth: { persistSession: false } });
 const outIdx = process.argv.indexOf("--out");
 
 // Latest ok fetch per license.
-const latest = new Map<string, string>();
+const latest = new Map<string, RawReceipt>();
 for (let from = 0; ; from += 1000) {
-  const { data, error } = await db.from("raw_dre_page_fetches").select("license_number,storage_path")
+  const { data, error } = await db.from("raw_dre_page_fetches").select(RAW_RECEIPT_COLUMNS)
     .eq("outcome", "ok").order("id").range(from, from + 999);
   if (error) throw new Error(JSON.stringify(error));
-  for (const r of data) latest.set(r.license_number, r.storage_path);
+  for (const r of data as unknown as RawReceipt[]) latest.set(r.license_number, r);
   if (data.length < 1000) break;
 }
 console.log(`pages to survey: ${latest.size}`);
@@ -32,28 +32,22 @@ const labels = new Map<string, LabelStats>();
 const encodings = new Map<string, number>();
 let incomplete = 0, done = 0;
 
-const queue = [...latest.entries()];
-await Promise.all(Array.from({ length: 12 }, async () => {
-  for (let item = queue.shift(); item; item = queue.shift()) {
-    const [license, path] = item;
-    const { data, error } = await db.storage.from("dre-raw").download(path);
-    if (error) throw new Error(`${license}: ${error.message}`);
-    const page = readPage(gunzipSync(new Uint8Array(await data.arrayBuffer())));
-    encodings.set(`${page.encoding}/${page.lineEndings}`, (encodings.get(`${page.encoding}/${page.lineEndings}`) ?? 0) + 1);
-    if (!page.complete) incomplete++;
-    for (const [label, entries] of page.fields) {
-      const s = labels.get(label) ?? { pages: 0, entries: 0, maxEntries: 0, shapes: new Map() };
-      s.pages++; s.entries += entries.length; s.maxEntries = Math.max(s.maxEntries, entries.length);
-      for (const e of entries) for (const line of e.lines) {
-        const k = shape(line);
-        const v = s.shapes.get(k) ?? { n: 0, example: line };
-        v.n++; s.shapes.set(k, v);
-      }
-      labels.set(label, s);
+await loadRawPages(db, [...latest.values()], (_r, raw) => {
+  const page = readPage(raw);
+  encodings.set(`${page.encoding}/${page.lineEndings}`, (encodings.get(`${page.encoding}/${page.lineEndings}`) ?? 0) + 1);
+  if (!page.complete) incomplete++;
+  for (const [label, entries] of page.fields) {
+    const s = labels.get(label) ?? { pages: 0, entries: 0, maxEntries: 0, shapes: new Map() };
+    s.pages++; s.entries += entries.length; s.maxEntries = Math.max(s.maxEntries, entries.length);
+    for (const e of entries) for (const line of e.lines) {
+      const k = shape(line);
+      const v = s.shapes.get(k) ?? { n: 0, example: line };
+      v.n++; s.shapes.set(k, v);
     }
-    if (++done % 5000 === 0) console.log(`  ${done}`);
+    labels.set(label, s);
   }
-}));
+  if (++done % 5000 === 0) console.log(`  ${done}`);
+});
 
 console.log(`\nencodings/line endings: ${JSON.stringify(Object.fromEntries(encodings))}; pages without end marker: ${incomplete}`);
 const report = [...labels.entries()].sort((a, b) => b[1].pages - a[1].pages).map(([label, s]) => ({

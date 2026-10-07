@@ -268,6 +268,25 @@ ok('bad affiliation kind rejected (whole group rolls back)', !!(await db.query(`
   [parsedPayload('LICENSED', [{ ...aff(1, 'X'), kind: 'nonsense' }], [])]).then(() => false, () => true))
   && (await db.query(`select string_agg(related_name, ',') s from dre_affiliations`)).rows[0].s === 'Broker C');
 
+// Raw bundles.
+for (const t of ['raw_dre_bundles', 'raw_archives']) {
+  ok(`anon cannot read ${t}`, !!(await fails(null, `select * from ${t}`)));
+  ok(`users cannot read ${t}`, !!(await fails(users.alice, `select * from ${t}`)));
+}
+ok('users cannot call raw_dre_attach_bundle', !!(await fails(users.alice, `select raw_dre_attach_bundle(1, '[]'::jsonb)`)));
+const single = (await db.query(`insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome, storage_path, sha256_raw)
+  values ($1, '01000001', 'u', 'ok', 'pages/01000001/a.html.gz', repeat('b', 64)) returning id`, [batch])).rows[0].id;
+const bundleRow = (await db.query(`insert into raw_dre_bundles (storage_path, byte_size, sha256, entry_count)
+  values ('bundles/pages/x.tar', 10, repeat('c', 64), 1) returning id`)).rows[0].id;
+ok('a stored page must be a single file OR a bundle entry, not both', !!(await db.query(
+  `update raw_dre_page_fetches set bundle_id = $1, bundle_entry = 'e' where id = $2`, [bundleRow, single]).then(() => false, () => true)));
+ok('attach moves a receipt from single file to bundle entry', (await db.query(`select raw_dre_attach_bundle($1, $2::jsonb) n`,
+  [bundleRow, JSON.stringify([{ id: single, entry: '01000001/a.html.gz' }])])).rows[0].n === 1);
+const att = (await db.query(`select storage_path, bundle_id, bundle_entry from raw_dre_page_fetches where id = $1`, [single])).rows[0];
+ok('receipt now points at the bundle', att.storage_path === null && att.bundle_id === bundleRow && att.bundle_entry === '01000001/a.html.gz');
+ok('attach refuses if any receipt is not a single file (all-or-nothing)', !!(await db.query(`select raw_dre_attach_bundle($1, $2::jsonb)`,
+  [bundleRow, JSON.stringify([{ id: single, entry: 'again' }])]).then(() => false, () => true)));
+
 for (const st of ['revoked', 'surrendered', 'suspended']) {
   ok(`ended_status '${st}' accepted`, !!(await db.query(`select dre_apply_parsed($1::jsonb)`,
     [parsedPayload('LICENSED', [{ ...aff(1, 'Corp'), kind: 'officer_of_corporation', is_current: false, ended_status: st, ended_on: '2022-09-20' }], [])]).then(() => true, () => false)));

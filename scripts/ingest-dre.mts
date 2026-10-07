@@ -1,4 +1,4 @@
-// DRE bulk-file ingestion into `realtors` (weekly, GitHub Actions).
+// DRE bulk-file ingestion into `realtors` (1st and 15th of each month, GitHub Actions).
 //
 //   1. Download CurrList.zip and store the exact bytes in the raw layer
 //      (dre-raw bucket + raw_dre_bulk_files) before using them.
@@ -8,8 +8,13 @@
 //      back in scope.
 //   4. Freeze and flag: realtors no longer in scope (left the DRE file or moved
 //      out of OC) get in_current_dre_file = false and are not updated further.
-//   5. Stamp last_seen_in_dre_file_at for everyone in scope.
+//   5. Keep the latest RAW_BULK_KEEP raw bulk files; purge older ones from Storage.
 //   Each run is logged in dre_ingest_runs.
+//
+// "Last confirmed in DRE's list" for a realtor still in the file is the start
+// of the latest succeeded run (dre_ingest_runs); rows are not rewritten just to
+// re-stamp a date, which would rewrite all ~49k rows (and their space) each run.
+// last_seen_in_dre_file_at is set whenever a row is written.
 //
 // Usage:
 //   node --env-file=.env.local scripts/ingest-dre.mts --dry-run   # read-only, prints counts
@@ -18,13 +23,13 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { appendFileSync } from "node:fs";
-import { BULK_SOURCE_URL, downloadBulkZip, parseBulkZip, storeBulkRaw } from "./lib/dre-bulk.mts";
+import { BULK_SOURCE_URL, downloadBulkZip, parseBulkZip, purgeOldBulkFiles, storeBulkRaw } from "./lib/dre-bulk.mts";
 import { buildScope, fingerprint } from "./lib/realtors-from-bulk.mts";
 
 const PAGE_SIZE = 1000;
 const UPSERT_BATCH = 500;
 const FLAG_BATCH = 200;
-const SEEN_BATCH = 5000;
+const RAW_BULK_KEEP = 6;
 // Refuse to write if today's in-scope count falls below this share of the
 // realtors currently marked in-file: a truncated or changed file must not
 // flag everyone as gone.
@@ -98,15 +103,14 @@ async function main() {
     for (const batch of chunks(toFlag, FLAG_BATCH)) {
       must("flag realtors", await db.from("realtors").update({ in_current_dre_file: false }).in("license_number", batch));
     }
-    for (const batch of chunks([...scope.keys()], SEEN_BATCH)) {
-      must("mark seen", await db.rpc("mark_realtors_seen", { p_license_numbers: batch, p_seen_at: startedAt }));
-    }
+    const purged = await purgeOldBulkFiles(db, RAW_BULK_KEEP);
     must("finish run", await db.from("dre_ingest_runs").update({ ...counts, bulk_file_id: bulkId, status: "succeeded",
       finished_at: new Date().toISOString() }).eq("id", runId!));
 
     const summary = [`### DRE bulk ingestion, run ${runId}: SUCCEEDED`,
       `| in file | OC in scope | inserted | updated | unchanged | flagged not in file |`, `|---|---|---|---|---|---|`,
-      `| ${rows.length} | ${scope.size} | ${inserted} | ${updated} | ${unchanged} | ${toFlag.length} |`].join("\n");
+      `| ${rows.length} | ${scope.size} | ${inserted} | ${updated} | ${unchanged} | ${toFlag.length} |`,
+      `Raw bulk files: kept latest ${RAW_BULK_KEEP}, purged ${purged.length} older.`].join("\n");
     console.log("\n" + summary);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary + "\n");
   } catch (err) {

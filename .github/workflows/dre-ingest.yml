@@ -1,12 +1,12 @@
 name: DRE ingestion
 
-# Weekly refresh of Orange County realtors (`realtors`) from the CA DRE
+# Twice-monthly refresh of Orange County realtors (`realtors`) from the CA DRE
 # licensee bulk file: raw copy stored first, then a fingerprint check writes
 # only new/changed realtors and flags those no longer in scope.
-# (Approved 2026-10-07: first load + weekly fingerprint refresh.)
+# (Approved 2026-10-07: first load + fingerprint refresh; twice monthly from 2026-10-08.)
 on:
   schedule:
-    - cron: "0 11 * * 1" # Mondays 11:00 UTC (4 AM PDT / 3 AM PST), after DRE's overnight update
+    - cron: "0 11 1,15 * *" # 1st and 15th, 11:00 UTC (4 AM PDT / 3 AM PST), after DRE's overnight update
   workflow_dispatch:
     inputs:
       dry_run:

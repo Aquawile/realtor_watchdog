@@ -56,6 +56,22 @@ export async function storeBulkRaw(db: SupabaseClient, bulk: { bytes: Uint8Array
   return row.data.id as number;
 }
 
+// Retention: keep the newest `keep` raw bulk files in Storage; purge older
+// ones (their receipt rows stay, marked purged_at). Returns purged ids.
+export async function purgeOldBulkFiles(db: SupabaseClient, keep: number): Promise<number[]> {
+  if (!Number.isInteger(keep) || keep < 1) throw new Error("keep must be a whole number >= 1");
+  const { data, error } = await db.from("raw_dre_bulk_files").select("id,storage_path").is("purged_at", null).order("id", { ascending: false });
+  if (error) throw new Error(`list bulk files: ${JSON.stringify(error)}`);
+  const old = data.slice(keep);
+  for (const b of old) {
+    const rm = await db.storage.from("dre-raw").remove([b.storage_path]);
+    if (rm.error) throw new Error(`purge bulk file ${b.id}: ${rm.error.message}`);
+    const up = await db.from("raw_dre_bulk_files").update({ purged_at: new Date().toISOString(), storage_path: null }).eq("id", b.id);
+    if (up.error) throw new Error(`mark bulk file ${b.id} purged: ${JSON.stringify(up.error)}`);
+  }
+  return old.map((b) => b.id as number);
+}
+
 // Orange County individuals (the realtors we profile).
 export const isOcIndividual = (r: DreRow) =>
   (r.lic_type === "Salesperson" || r.lic_type === "Broker") &&

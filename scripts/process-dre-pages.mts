@@ -12,11 +12,11 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { appendFileSync } from "node:fs";
-import { gunzipSync } from "node:zlib";
 import { PARSER_VERSION, parsePage, suspiciousName } from "./lib/dre-page-parser.mts";
+import { loadRawPages, RAW_RECEIPT_COLUMNS, type RawReceipt } from "./lib/raw-pages.mts";
 
 const APPLY_BATCH = 100;
-const DOWNLOAD_CONCURRENCY = 12;
+const DOWNLOAD_CONCURRENCY = 6; // bundles (or groups of single files) in parallel
 const MAX_FAILURE_RATE = 0.01;
 
 const reprocess = process.argv.includes("--reprocess");
@@ -47,12 +47,12 @@ let status: "completed" | "failed" = "completed";
 let errorText: string | null = null;
 
 try {
-  // Latest verified ok raw fetch per license.
-  const latest = new Map<string, { id: number; storage_path: string }>();
+  // Latest verified ok raw fetch per license (single file or bundle entry).
+  const latest = new Map<string, RawReceipt>();
   for (let from = 0; ; from += 1000) {
-    const page = await retry("load raw receipts", () => db.from("raw_dre_page_fetches").select("id,license_number,storage_path")
+    const page = await retry("load raw receipts", () => db.from("raw_dre_page_fetches").select(RAW_RECEIPT_COLUMNS)
       .eq("outcome", "ok").not("verified_at", "is", null).order("id").range(from, from + 999));
-    for (const r of page as { id: number; license_number: string; storage_path: string }[]) latest.set(r.license_number, r);
+    for (const r of page as RawReceipt[]) latest.set(r.license_number, r);
     if ((page as unknown[]).length < 1000) break;
   }
   // Already processed from the same raw file with this parser version.
@@ -67,51 +67,50 @@ try {
       if ((page as unknown[]).length < 1000) break;
     }
   }
-  const todo = [...latest.entries()].filter(([lic, r]) => current.get(lic) !== `${r.id}/${PARSER_VERSION}`).slice(0, limit);
+  const todo = [...latest.values()].filter((r) => current.get(r.license_number) !== `${r.id}/${PARSER_VERSION}`).slice(0, limit);
   stats.considered = latest.size;
   stats.skipped = latest.size - todo.length;
   log(`raw licenses: ${latest.size}; already up to date: ${stats.skipped}; to process: ${todo.length} (parser v${PARSER_VERSION})`);
   await retry("update run", () => db.from("dre_process_runs").update({ pages_considered: latest.size, pages_skipped: stats.skipped }).eq("id", runId));
 
-  // Download + parse in parallel; apply in groups.
+  // Read raw pages (each bundle downloaded once), parse, apply in groups.
   let pending: unknown[] = [];
   const flush = async () => {
     if (!pending.length) return;
     const group = pending; pending = [];
     await retry("apply parsed", () => db.rpc("dre_apply_parsed", { p: group }));
   };
-  const queue = [...todo];
   let lastLog = Date.now();
-  await Promise.all(Array.from({ length: DOWNLOAD_CONCURRENCY }, async () => {
-    for (let item = queue.shift(); item; item = queue.shift()) {
-      const [license, raw] = item;
-      try {
-        const blob = await retry(`download ${license}`, () => db.storage.from("dre-raw").download(raw.storage_path));
-        const parsed = parsePage(gunzipSync(new Uint8Array(await (blob as Blob).arrayBuffer())), license);
-        pending.push({ record: { ...parsed.record, source_fetch_id: raw.id, parser_version: PARSER_VERSION },
-          affiliations: parsed.affiliations, actions: parsed.actions });
-        stats.processed++;
-        if (parsed.record.unparsed_lines.length) stats.withUnparsed++;
-        stats.affiliations += parsed.affiliations.length;
-        stats.actions += parsed.actions.length;
-        for (const a of parsed.affiliations) {
-          if (suspiciousName(a.related_name)) { stats.suspiciousNames++; if (suspicious.length < 20) suspicious.push(`${license} [${a.kind}] ${a.related_name}`); }
-        }
-        if (pending.length >= APPLY_BATCH) await flush();
-      } catch (e) {
-        stats.failed++;
-        failures.push(`${license}: ${e instanceof Error ? e.message : String(e)}`);
-        if (stats.failed > 20 && stats.failed / (stats.processed + stats.failed) > MAX_FAILURE_RATE) {
-          throw new Error(`too many failures (${stats.failed}); last: ${failures.at(-1)}`);
-        }
-      }
-      if (Date.now() - lastLog > 30_000) {
-        lastLog = Date.now();
-        log(`${stats.processed + stats.failed}/${todo.length} (processed ${stats.processed}, failed ${stats.failed})`);
-        await db.from("dre_process_runs").update({ pages_processed: stats.processed, pages_failed: stats.failed }).eq("id", runId);
-      }
+  const recordFailure = (license: string, e: unknown) => {
+    stats.failed++;
+    failures.push(`${license}: ${e instanceof Error ? e.message : String(e)}`);
+    if (stats.failed > 20 && stats.failed / (stats.processed + stats.failed) > MAX_FAILURE_RATE) {
+      throw new Error(`too many failures (${stats.failed}); last: ${failures.at(-1)}`);
     }
-  }));
+  };
+  await loadRawPages(db, todo, async (raw, pageBytes) => {
+    const license = raw.license_number;
+    try {
+      const parsed = parsePage(pageBytes, license);
+      pending.push({ record: { ...parsed.record, source_fetch_id: raw.id, parser_version: PARSER_VERSION },
+        affiliations: parsed.affiliations, actions: parsed.actions });
+      stats.processed++;
+      if (parsed.record.unparsed_lines.length) stats.withUnparsed++;
+      stats.affiliations += parsed.affiliations.length;
+      stats.actions += parsed.actions.length;
+      for (const a of parsed.affiliations) {
+        if (suspiciousName(a.related_name)) { stats.suspiciousNames++; if (suspicious.length < 20) suspicious.push(`${license} [${a.kind}] ${a.related_name}`); }
+      }
+      if (pending.length >= APPLY_BATCH) await flush();
+    } catch (e) {
+      recordFailure(license, e);
+    }
+    if (Date.now() - lastLog > 30_000) {
+      lastLog = Date.now();
+      log(`${stats.processed + stats.failed}/${todo.length} (processed ${stats.processed}, failed ${stats.failed})`);
+      await db.from("dre_process_runs").update({ pages_processed: stats.processed, pages_failed: stats.failed }).eq("id", runId);
+    }
+  }, { concurrency: DOWNLOAD_CONCURRENCY, onError: (r, e) => recordFailure(r.license_number, e) });
   await flush();
   if (stats.failed) { status = "failed"; errorText = `${stats.failed} pages failed: ${failures.slice(0, 5).join("; ")}`; }
 } catch (e) {

@@ -12,8 +12,7 @@
 // Exit code 0 = PASS, 1 = FAIL.
 
 import { createClient } from "@supabase/supabase-js";
-import { createHash } from "node:crypto";
-import { gunzipSync } from "node:zlib";
+import { loadRawPages, RAW_RECEIPT_COLUMNS, type RawReceipt } from "./lib/raw-pages.mts";
 
 // Batch 2 failed before fetching anything (fixed bug); it is expected history.
 const KNOWN_FAILED_BATCHES = new Set([2]);
@@ -23,13 +22,12 @@ if (!Number.isInteger(batchId)) throw new Error("usage: check-dre-raw.mts <batch
 const db = createClient(process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SECRET_KEY!,
   { auth: { persistSession: false } });
 
-type Receipt = { id: number; batch_id: number; license_number: string; storage_path: string | null; sha256_raw: string | null;
-  outcome: string; verified_at: string | null };
+type Receipt = RawReceipt & { batch_id: number; outcome: string; verified_at: string | null };
 
 async function receipts(filter?: (q: any) => any): Promise<Receipt[]> { // eslint-disable-line @typescript-eslint/no-explicit-any
   const out: Receipt[] = [];
   for (let from = 0; ; from += 1000) {
-    let q = db.from("raw_dre_page_fetches").select("id,batch_id,license_number,storage_path,sha256_raw,outcome,verified_at")
+    let q = db.from("raw_dre_page_fetches").select(`${RAW_RECEIPT_COLUMNS},batch_id,outcome,verified_at`)
       .order("id").range(from, from + 999);
     if (filter) q = filter(q);
     const { data, error } = await q;
@@ -61,26 +59,23 @@ const mine = await receipts((q) => q.eq("batch_id", batchId));
 const others = await receipts((q) => q.neq("batch_id", batchId).not("sha256_raw", "is", null));
 const shaOwner = new Map(others.map((r) => [r.sha256_raw, r.license_number]));
 let checked = 0;
-const queue = [...mine];
-await Promise.all(Array.from({ length: 10 }, async () => {
-  for (let r = queue.shift(); r; r = queue.shift()) {
-    if (r.outcome !== "ok" && r.outcome !== "not_found") { fails.push(`${r.license_number}: outcome ${r.outcome}`); continue; }
-    if (!r.verified_at) fails.push(`${r.license_number}: not verified`);
-    const { data, error } = await db.storage.from("dre-raw").download(r.storage_path!);
-    if (error) { fails.push(`${r.license_number}: download failed (${error.message})`); continue; }
-    const raw = gunzipSync(new Uint8Array(await data.arrayBuffer()));
-    if (createHash("sha256").update(raw).digest("hex") !== r.sha256_raw) fails.push(`${r.license_number}: checksum mismatch`);
-    const owner = shaOwner.get(r.sha256_raw!);
-    if (owner && owner !== r.license_number) fails.push(`${r.license_number}: byte-identical to ${owner}'s page`);
-    const html = new TextDecoder("latin1").decode(raw);
-    if (r.outcome === "ok") {
-      if (!/Public information request complete/i.test(html)) fails.push(`${r.license_number}: no end-of-record marker`);
-      const shown = pageLicense(html);
-      if (shown !== r.license_number) fails.push(`${r.license_number}: page shows license ${shown}`);
-    }
-    checked++;
+const stored = mine.filter((r) => {
+  if (r.outcome !== "ok" && r.outcome !== "not_found") { fails.push(`${r.license_number}: outcome ${r.outcome}`); return false; }
+  if (!r.verified_at) fails.push(`${r.license_number}: not verified`);
+  return true;
+});
+// loadRawPages re-checks each page's checksum and size against its receipt.
+await loadRawPages(db, stored, (r, raw) => {
+  const owner = shaOwner.get(r.sha256_raw);
+  if (owner && owner !== r.license_number) fails.push(`${r.license_number}: byte-identical to ${owner}'s page`);
+  const html = new TextDecoder("latin1").decode(raw);
+  if (r.outcome === "ok") {
+    if (!/Public information request complete/i.test(html)) fails.push(`${r.license_number}: no end-of-record marker`);
+    const shown = pageLicense(html);
+    if (shown !== r.license_number) fails.push(`${r.license_number}: page shows license ${shown}`);
   }
-}));
+  checked++;
+}, { onError: (r, e) => fails.push(`${r.license_number}: ${e.message}`) });
 console.log(`HYGIENE: ${checked}/${mine.length} pages downloaded and checked (checksum, license identity, completeness, uniqueness)`);
 
 // 3. Overall health.
@@ -89,14 +84,14 @@ const unhealthy = (batches ?? []).filter((x) => x.status === "running" || x.stat
   (x.status === "failed" && !KNOWN_FAILED_BATCHES.has(x.id)));
 if (unhealthy.length) fails.push(`unhealthy batches: ${JSON.stringify(unhealthy)}`);
 const every = await receipts();
-const stored = every.filter((r) => r.storage_path);
-const unverified = stored.filter((r) => !r.verified_at && r.outcome !== "verify_failed").length;
+const storedAll = every.filter((r) => r.storage_path || r.bundle_id !== null);
+const unverified = storedAll.filter((r) => !r.verified_at && r.outcome !== "verify_failed").length;
 if (unverified) fails.push(`${unverified} stored files were never verified`);
 const okLicenses = new Set(every.filter((r) => r.outcome === "ok" || r.outcome === "not_found").map((r) => r.license_number));
 const okRows = every.filter((r) => r.outcome === "ok").length;
 const { data: bulk } = await db.from("raw_dre_bulk_files").select("id,fetched_at,byte_size").order("id");
 const bulkBytes = (bulk ?? []).reduce((s, x) => s + x.byte_size, 0);
-console.log(`HEALTH: ${batches?.length} batches, unhealthy: ${unhealthy.length}; receipts ${every.length}, stored files ${stored.length}, ` +
+console.log(`HEALTH: ${batches?.length} batches, unhealthy: ${unhealthy.length}; receipts ${every.length}, stored pages ${storedAll.length} (${storedAll.filter((r) => r.bundle_id !== null).length} in bundles), ` +
   `unverified ${unverified}; unique licenses stored ${okLicenses.size}` + (okRows !== okLicenses.size ? ` (${okRows - okLicenses.size} stored twice)` : "") +
   `; bulk file copies ${bulk?.length} (${(bulkBytes / 1048576).toFixed(0)} MB)`);
 console.log(fails.length ? `RESULT: FAIL\n  ${fails.slice(0, 25).join("\n  ")}` : "RESULT: PASS");
