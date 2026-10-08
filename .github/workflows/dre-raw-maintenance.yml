@@ -2,7 +2,6 @@ name: DRE raw maintenance
 
 # One-off raw-layer maintenance (scripts/maintain-dre-raw.mts). Manual only.
 #   bundle           pack single-file raw pages into verified .tar bundles, then delete the single files
-#   archive-headers  move fetch headers + request URLs out of the database into one verified archive file
 #   purge-bulk       keep the latest 6 raw bulk files, purge older ones
 on:
   workflow_dispatch:
@@ -10,7 +9,7 @@ on:
       task:
         description: "Maintenance task"
         type: choice
-        options: [bundle, archive-headers, purge-bulk]
+        options: [bundle, purge-bulk]
 
 permissions:
   contents: read

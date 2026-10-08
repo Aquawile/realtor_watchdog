@@ -164,7 +164,7 @@ async function selftest(batchId: number): Promise<string[]> {
   await w("selftest set plan", db.from("raw_dre_fetch_batches").update({ planned_count: 0 }).eq("id", batchId));
   await w("selftest progress", db.from("raw_dre_fetch_batches").update({ attempted: 0, current_concurrency: 1, last_heartbeat_at: new Date().toISOString() }).eq("id", batchId));
   await w("selftest log receipt", db.from("raw_dre_page_fetches").insert({
-    batch_id: batchId, license_number: "00000000", requested_url: "selftest", duration_ms: 0, attempts: 1, outcome: "network_error", error: "selftest receipt",
+    batch_id: batchId, license_number: "00000000", duration_ms: 0, attempts: 1, outcome: "network_error", error: "selftest receipt",
   }));
   const [receipt] = await q("selftest read receipt", db.from("raw_dre_page_fetches").select("id").eq("batch_id", batchId).eq("license_number", "00000000"));
   if (!receipt) throw new Error("selftest receipt not found after insert");
