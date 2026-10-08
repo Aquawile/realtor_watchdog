@@ -227,11 +227,11 @@ for (const t of ['raw_dre_bulk_files', 'raw_dre_fetch_batches', 'raw_dre_page_fe
 ok('dre-raw bucket is private', (await db.query(`select public from storage.buckets where id = 'dre-raw'`)).rows[0]?.public === false);
 const batch = (await db.query(`insert into raw_dre_fetch_batches (runner) values ('test') returning id`)).rows[0].id;
 ok('page fetch needs a stored file when ok', !!(await db.query(
-  `insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome) values ($1, '00000001', 'u', 'ok')`, [batch]).then(() => false, () => true)));
+  `insert into raw_dre_page_fetches (batch_id, license_number, outcome) values ($1, '00000001', 'ok')`, [batch]).then(() => false, () => true)));
 ok('network error has no stored file', !!(await db.query(
-  `insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome, error) values ($1, '00000001', 'u', 'network_error', 'timeout') returning id`, [batch])));
+  `insert into raw_dre_page_fetches (batch_id, license_number, outcome, error) values ($1, '00000001', 'network_error', 'timeout') returning id`, [batch])));
 ok('bad license number rejected', !!(await db.query(
-  `insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome) values ($1, '123', 'u', 'network_error')`, [batch]).then(() => false, () => true)));
+  `insert into raw_dre_page_fetches (batch_id, license_number, outcome) values ($1, '123', 'network_error')`, [batch]).then(() => false, () => true)));
 
 // Processed DRE layer.
 for (const t of ['dre_licensee_records', 'dre_affiliations', 'dre_actions', 'dre_process_runs']) {
@@ -239,8 +239,8 @@ for (const t of ['dre_licensee_records', 'dre_affiliations', 'dre_actions', 'dre
   ok(`users cannot read ${t}`, !!(await fails(users.alice, `select * from ${t}`)));
 }
 ok('users cannot call dre_apply_parsed', !!(await fails(users.alice, `select dre_apply_parsed('[]'::jsonb)`)));
-const fetchId = (await db.query(`insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome, storage_path, sha256_raw)
-  values ($1, '00323437', 'u', 'ok', 'pages/00323437/x.html.gz', repeat('a', 64)) returning id`, [batch])).rows[0].id;
+const fetchId = (await db.query(`insert into raw_dre_page_fetches (batch_id, license_number, outcome, storage_path, sha256_raw)
+  values ($1, '00323437', 'ok', 'pages/00323437/x.html.gz', repeat('a', 64)) returning id`, [batch])).rows[0].id;
 const parsedPayload = (status, affiliations, actions) => JSON.stringify([{
   record: { license_number: '00323437', source_fetch_id: fetchId, parser_version: 1, dre_records_as_of: '9/27/2026 1:40:26 PM',
     page_encoding: 'utf-8', license_type: 'BROKER', name_as_listed: 'Doe, Jane', license_status_raw: status,
@@ -274,8 +274,8 @@ for (const t of ['raw_dre_bundles', 'raw_archives']) {
   ok(`users cannot read ${t}`, !!(await fails(users.alice, `select * from ${t}`)));
 }
 ok('users cannot call raw_dre_attach_bundle', !!(await fails(users.alice, `select raw_dre_attach_bundle(1, '[]'::jsonb)`)));
-const single = (await db.query(`insert into raw_dre_page_fetches (batch_id, license_number, requested_url, outcome, storage_path, sha256_raw)
-  values ($1, '01000001', 'u', 'ok', 'pages/01000001/a.html.gz', repeat('b', 64)) returning id`, [batch])).rows[0].id;
+const single = (await db.query(`insert into raw_dre_page_fetches (batch_id, license_number, outcome, storage_path, sha256_raw)
+  values ($1, '01000001', 'ok', 'pages/01000001/a.html.gz', repeat('b', 64)) returning id`, [batch])).rows[0].id;
 const bundleRow = (await db.query(`insert into raw_dre_bundles (storage_path, byte_size, sha256, entry_count)
   values ('bundles/pages/x.tar', 10, repeat('c', 64), 1) returning id`)).rows[0].id;
 ok('a stored page must be a single file OR a bundle entry, not both', !!(await db.query(
