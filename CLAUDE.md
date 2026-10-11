@@ -98,6 +98,13 @@ The platform makes no editorial statements about any realtor or property. It sur
   - Users never see raw tables or fetch bookkeeping (HTTP headers, request URLs, checksums). Fetch headers and URLs were archived to Storage (`raw_archives`) and are not kept in the database.
   - Maintenance: `scripts/maintain-dre-raw.mts` (`--bundle`, `--archive-headers`, `--show <license>` prints a raw page, `--purge-bulk`), via the `DRE raw maintenance` workflow.
   - "Last confirmed in DRE's list" = start of the latest succeeded `dre_ingest_runs` run for realtors still in the file. Rows aren't rewritten just to re-stamp a date.
+- **Phase 2 data layer (built 2026-10-11).** Code in `src/lib/`.
+  - `supabase/server.ts` and `supabase/browser.ts` (via `@supabase/ssr`) use the **publishable key only**; RLS applies. The secret key never reaches the app.
+  - `database.types.ts` is generated from the live schema (`npm run gen:types` after every migration).
+  - `data/repository.ts`: generic `createReader<T>()` / `createRepository<T>()` with typed list/get/count/insert/update/remove, full-text and substring search. `T` must be in `READABLE` / `WRITABLE`. Raw and internal tables don't compile; `data/repository.typecheck.ts` proves it, and the type-check fails if that ever erodes.
+  - Users read **curated views only**: `public_realtors`, `public_dre_records`, `public_dre_affiliations`, `public_dre_actions`, `review_feed`, `comment_feed`, `realtor_rating_summary`, `public_profiles`. These leave out internal columns. Direct reads of `realtors` are revoked.
+  - **New views must `revoke all` before `grant select`.** Supabase grants new views ALL by default, and simple views are auto-updatable, so users could otherwise write to the base tables through them.
+  - Domain functions: `data/realtors.ts` (`searchRealtors`, `getRealtorProfile`; 0.2–1.0 s live) and `data/reviews.ts` (post/edit/delete reviews and comments, reactions, reports).
 - **Testing:** `npm test` runs every suite and fails on any failed, skipped, todo or missing test. `.github/workflows/checks.yml` runs lint, type-check, tests and build on every push, and data workflows run it first.
 - **Schema lives in `supabase/migrations/`.** Behavioral tests: `npm run test:db` (PGlite, no Docker).
 

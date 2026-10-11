@@ -76,16 +76,18 @@ await db.exec(`
          ('00007012', 'Delanoy', 'Peter Nelson', 'broker', 'Licensed', null, null, 'IRVINE', 'ORANGE');
 `);
 ok('anon can search realtors (FTS)', (await as(null,
-  `select license_number from realtors where search_vector @@ plainto_tsquery('simple','coldwell')`)).rows.length === 1);
+  `select license_number from public_realtors where search_vector @@ plainto_tsquery('simple','coldwell')`)).rows.length === 1);
 ok('anon can search realtors (trigram)', (await as(null,
-  `select license_number from realtors where full_name % 'Edwerd Hill'`)).rows.length === 1);
+  `select license_number from public_realtors where full_name % 'Edwerd Hill'`)).rows.length === 1);
 ok('anon cannot write realtors', !!(await fails(null, `update realtors set last_name='x'`)));
+ok('anon cannot read the realtors table directly (only public_realtors)', !!(await fails(null, `select * from realtors`)));
+ok('users cannot read the realtors table directly', !!(await fails(users.alice, `select * from realtors`)));
 await db.exec(`update realtors set employing_broker_name = 'Compass', last_name = 'Hill' where license_number = '00221331'`);
 const hist = (await db.query(`select * from realtor_history`)).rows;
 ok('realtor change logged (only changed fields)', hist.length === 1 && Object.keys(hist[0].new_values).join() === 'employing_broker_name');
 await db.exec(`update realtors set officer_of = '[{"license_number":"01234567","name":"Delanoy Realty Inc"}]' where license_number = '00007012'`);
 ok('brokerage search matches officer corporation', (await as(null,
-  `select license_number from realtors where search_vector @@ plainto_tsquery('simple','delanoy realty')`)).rows[0]?.license_number === '00007012');
+  `select license_number from public_realtors where search_vector @@ plainto_tsquery('simple','delanoy realty')`)).rows[0]?.license_number === '00007012');
 ok('officer_of change logged', (await db.query(`select 1 from realtor_history where license_number = '00007012' and new_values ? 'officer_of'`)).rows.length === 1);
 ok('officer_of must be an array', !!(await db.query(`update realtors set officer_of = '{}' where license_number = '00007012'`).then(() => false, () => true)));
 ok('mark_realtors_seen not callable by anon', !!(await fails(null, `select mark_realtors_seen(array['00007012'], now())`)));
@@ -293,6 +295,27 @@ for (const st of ['revoked', 'surrendered', 'suspended']) {
 }
 ok('unknown ended_status rejected', !!(await db.query(`select dre_apply_parsed($1::jsonb)`,
   [parsedPayload('LICENSED', [{ ...aff(1, 'Corp'), kind: 'officer_of_corporation', ended_status: 'vanished' }], [])]).then(() => false, () => true)));
+
+// Public read layer: curated views only, no internal columns.
+const viewCols = async (v) => (await db.query(`select column_name from information_schema.columns where table_name = $1`, [v])).rows.map((r) => r.column_name);
+const internal = ['dre_fingerprint', 'source_fetch_id', 'parser_version', 'unparsed_lines', 'page_encoding', 'processed_at', 'storage_path', 'sha256_raw', 'id'];
+for (const v of ['public_realtors', 'public_dre_records', 'public_dre_affiliations', 'public_dre_actions']) {
+  const cols = await viewCols(v);
+  ok(`${v} exposes no internal columns`, cols.length > 0 && !cols.some((c) => internal.includes(c)), cols.join(','));
+  ok(`anon can read ${v}`, (await as(null, `select * from ${v} limit 1`)) !== undefined);
+  ok(`users cannot write ${v}`, !!(await fails(users.alice, `delete from ${v}`)));
+}
+for (const v of ['review_feed', 'comment_feed', 'realtor_rating_summary', 'public_profiles']) {
+  for (const who of [null, 'alice']) {
+    const uid = who ? users[who] : null;
+    ok(`${who ?? 'anon'} cannot delete through ${v}`, !!(await fails(uid, `delete from ${v}`)));
+    ok(`${who ?? 'anon'} cannot update through ${v}`, !!(await fails(uid, `update ${v} set license_number = license_number`).then(async (m) => m || await fails(uid, `update ${v} set id = id`))));
+  }
+}
+ok('public_dre_records carries the processed facts', (await as(null, `select is_restricted, former_names from public_dre_records where license_number = '00323437'`)).rows.length === 1);
+ok('public_dre_actions shows DRE document links only (no reviewer uploads)', (await viewCols('public_dre_actions')).includes('document_url')
+  && !(await viewCols('public_dre_actions')).some((c) => c.includes('upload')));
+ok('public_realtors flags non-working (NBA) status', (await viewCols('public_realtors')).includes('is_non_working'));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
