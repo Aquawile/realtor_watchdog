@@ -24,7 +24,8 @@ A place where people can look up a realtor they're considering and see what othe
 - Account required ≠ transaction verification required. No mandatory proof to post.
 - Reviewer MUST pick Buyer or Seller via a single tag/flair, once per review (like a Reddit post flair). Comments in that review's thread do NOT repeat the tag.
 - Buyer and Seller reviews are NOT mutually exclusive; both always display together on a realtor's profile.
-- Supporting documents (e.g., closing disclosure) are OPTIONAL and never block posting. Uploading one does NOT auto-grant "Verified Client"; only a moderator's manual confirmation does.
+- Supporting documents (e.g., closing disclosure) are OPTIONAL and never block posting.
+- **Documents shown to users (decided 2026-10-11):** links to DRE's official hearing documents (DRE's copies; we never host them) appear on realtor profiles. Reviewer-uploaded proof stays moderator-only (it contains private info); the public sees only the "Verified Client" badge. Uploading one does NOT auto-grant "Verified Client"; only a moderator's manual confirmation does.
 - Reviews are presented as the reviewer's own statements, never as facts asserted by the platform.
 - Positive and negative reviews are treated equally. Never suppress a review for being negative.
 - Report/moderation flow for false, defamatory, threatening, private, or prohibited content. Reported content stays live pending review. Dismissal is the expected outcome for reports filed only because a review is negative.
