@@ -24,7 +24,8 @@ A place where people can look up a realtor they're considering and see what othe
 - Account required ≠ transaction verification required. No mandatory proof to post.
 - Reviewer MUST pick Buyer or Seller via a single tag/flair, once per review (like a Reddit post flair). Comments in that review's thread do NOT repeat the tag.
 - Buyer and Seller reviews are NOT mutually exclusive; both always display together on a realtor's profile.
-- Supporting documents (e.g., closing disclosure) are OPTIONAL and never block posting. Uploading one does NOT auto-grant "Verified Client"; only a moderator's manual confirmation does.
+- Supporting documents (e.g., closing disclosure) are OPTIONAL and never block posting.
+- **Documents shown to users (decided 2026-10-11):** links to DRE's official hearing documents (DRE's copies; we never host them) appear on realtor profiles. Reviewer-uploaded proof stays moderator-only (it contains private info); the public sees only the "Verified Client" badge. Uploading one does NOT auto-grant "Verified Client"; only a moderator's manual confirmation does.
 - Reviews are presented as the reviewer's own statements, never as facts asserted by the platform.
 - Positive and negative reviews are treated equally. Never suppress a review for being negative.
 - Report/moderation flow for false, defamatory, threatening, private, or prohibited content. Reported content stays live pending review. Dismissal is the expected outcome for reports filed only because a review is negative.
@@ -90,17 +91,26 @@ The platform makes no editorial statements about any realtor or property. It sur
   - Addresses are dropped. Every row records `source_fetch_id` and `parser_version`, so the layer can be rebuilt from raw. Rows for a licensee are replaced atomically (`dre_apply_parsed`).
   - **Auto-routing:** `.github/workflows/dre-raw-fetch.yml` runs `.github/workflows/dre-process.yml` after every successful fetch batch. It can also be run by hand, with `reprocess` to rebuild everything.
 - **Space budget (agreed 2026-10-08). Free limits: 500 MB database, 1 GB Storage. Budget before adding data.**
+  - **Measured 2026-10-11 after cleanup: database 87 MB** (realtors 31 MB, dre_affiliations 21 MB, receipts 13 MB, dre_licensee_records 9 MB). `VACUUM FULL` has to be run through `psql` on the session pooler (port 5432), not the SQL Editor, which wraps queries in a transaction.
   - Database: Supabase system data ~15 MB, realtor data (bulk + DRE history) ~95 MB, users/reviews/comments/reports ~50 MB, **property cache capped at ~200 MB** (least-recently-viewed dropped first, rebuilt from raw), ~140 MB headroom.
   - Storage: raw DRE pages ~100 MB, raw bulk files (latest 6 kept), raw property responses ~300 MB cap, reviewer documents ~200 MB, ~250 MB headroom.
   - **Every Storage object costs ~1.2 KB of database space** (Supabase's `storage.objects` row). So raw data is stored as **bundles** (`.tar`, about 1,000 pages each; `scripts/lib/raw-pages.mts`, `scripts/lib/tar.mts`), not thousands of tiny files. Pages are byte-identical inside; receipts point to (bundle, entry) and keep checksums. Bundling deletes single files only after the bundle is re-verified.
   - Users never see raw tables or fetch bookkeeping (HTTP headers, request URLs, checksums). Fetch headers and URLs were archived to Storage (`raw_archives`) and are not kept in the database.
   - Maintenance: `scripts/maintain-dre-raw.mts` (`--bundle`, `--archive-headers`, `--show <license>` prints a raw page, `--purge-bulk`), via the `DRE raw maintenance` workflow.
   - "Last confirmed in DRE's list" = start of the latest succeeded `dre_ingest_runs` run for realtors still in the file. Rows aren't rewritten just to re-stamp a date.
+- **Phase 2 data layer (built 2026-10-11).** Code in `src/lib/`.
+  - `supabase/server.ts` and `supabase/browser.ts` (via `@supabase/ssr`) use the **publishable key only**; RLS applies. The secret key never reaches the app.
+  - `database.types.ts` is generated from the live schema (`npm run gen:types` after every migration).
+  - `data/repository.ts`: generic `createReader<T>()` / `createRepository<T>()` with typed list/get/count/insert/update/remove, full-text and substring search. `T` must be in `READABLE` / `WRITABLE`. Raw and internal tables don't compile; `data/repository.typecheck.ts` proves it, and the type-check fails if that ever erodes.
+  - Users read **curated views only**: `public_realtors`, `public_dre_records`, `public_dre_affiliations`, `public_dre_actions`, `review_feed`, `comment_feed`, `realtor_rating_summary`, `public_profiles`. These leave out internal columns. Direct reads of `realtors` are revoked.
+  - **New views must `revoke all` before `grant select`.** Supabase grants new views ALL by default, and simple views are auto-updatable, so users could otherwise write to the base tables through them.
+  - Domain functions: `data/realtors.ts` (`searchRealtors`, `getRealtorProfile`; 0.2–1.0 s live) and `data/reviews.ts` (post/edit/delete reviews and comments, reactions, reports).
 - **Testing:** `npm test` runs every suite and fails on any failed, skipped, todo or missing test. `.github/workflows/checks.yml` runs lint, type-check, tests and build on every push, and data workflows run it first.
 - **Schema lives in `supabase/migrations/`.** Behavioral tests: `npm run test:db` (PGlite, no Docker).
 
 ## Stack (agreed)
 - Next.js (App Router) + TypeScript + Tailwind, ESLint, `src/` dir, `@/*` alias — already scaffolded.
+- **Auth: Supabase Auth (decided 2026-10-11)** with email + password and email verification. Firebase was considered and rejected: our schema and RLS already assume Supabase Auth, it would mean two vendors, and every Firebase project is a GCP project, which the no-GCP rule forbids. Production email needs a free SMTP provider plus a domain, because Supabase's built-in sender is rate-limited for testing. The 30-minute idle logout is implemented in the app.
 - Supabase free tier: Postgres, Auth, Storage (optional review documents; visible to moderators only).
 - Vercel free tier: hosting.
 - GitHub Actions: scheduled DRE ingestion (cron). No Cloud Scheduler/Cloud Run.
