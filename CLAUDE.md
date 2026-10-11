@@ -102,6 +102,7 @@ The platform makes no editorial statements about any realtor or property. It sur
 
 ## Stack (agreed)
 - Next.js (App Router) + TypeScript + Tailwind, ESLint, `src/` dir, `@/*` alias — already scaffolded.
+- **Auth: Supabase Auth (decided 2026-10-11)** with email + password and email verification. Firebase was considered and rejected: our schema and RLS already assume Supabase Auth, it would mean two vendors, and every Firebase project is a GCP project, which the no-GCP rule forbids. Production email needs a free SMTP provider plus a domain, because Supabase's built-in sender is rate-limited for testing. The 30-minute idle logout is implemented in the app.
 - Supabase free tier: Postgres, Auth, Storage (optional review documents; visible to moderators only).
 - Vercel free tier: hosting.
 - GitHub Actions: scheduled DRE ingestion (cron). No Cloud Scheduler/Cloud Run.
