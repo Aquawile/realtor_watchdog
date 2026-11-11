@@ -1,0 +1,27 @@
+Copyright (c) 2026 Isabella Butera. All rights reserved.
+
+This repository and everything in it (the "Software") is proprietary.
+The source code is visible so that people can review my work. Visibility
+is not a license.
+
+Without prior written permission from the copyright holder, you may not:
+
+  - copy, reproduce, or redistribute the Software, in whole or in part;
+  - modify the Software or create derivative works based on it;
+  - use the Software, or any part of it, in a product, service, or
+    commercial or internal business project;
+  - host, publish, sublicense, sell, or lease the Software;
+  - use the Software, its data, or its documentation to train or fine-tune
+    any machine-learning model.
+
+The only exceptions are the rights you already have by law, and the right
+to view and fork this repository on GitHub as GitHub's Terms of Service
+allow. Forking does not grant any license to the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+To request permission, contact: izzybutera11@gmail.com
